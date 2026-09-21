@@ -6,17 +6,32 @@ servo controller, reusing Project 1's rosbridge TCP/JSON gateway protocol unchan
 
 ## Status
 
-Just scaffolding so far: the unmodified starter skeleton (`Makefile`, `src/main.py` placeholder)
-plus the `prompts/`/`agent-notes/` workflow described below. No dynamics, integrators, PID, IK, or
-gateway code has been written yet.
+**Checkpoint complete**: `/arm_sim/integration_step` is implemented and live — `make build && make
+run` exposes a real gateway on `127.0.0.1:9095`, and the checkpoint service correctly selects
+among all four integrators, rejects malformed input cleanly, and stays responsive afterward. 50/50
+tests pass (`make test`).
+
+Not yet built: the live n-link arm itself (`arm_dynamics.py`, `pid.py`, `/arm_sim/set_*`,
+`/joint_trajectory`, `/joint_states`) and inverse kinematics (`kinematics.py`, `/ik/*`,
+`/ik_action/*`, `/ik_trial/*`).
 
 ## Layout
 
 - `prompts/` — reusable Plan/Implement/Audit/Test agent instructions for working on this repo in
   short, focused sessions. Not modified per-task. Each file's "Project context" section describes
-  the target architecture (see below) — the intended layout to build toward, not yet as-built.
+  the target architecture (see below).
 - `agent-notes/` — persistent handoff artifacts for the current task: `PLAN.md`,
   `IMPLEMENTATION.md`, `AUDIT.md`, `TEST_RESULTS.md`, written by their respective phase.
+- `src/registry.py`, `src/gateway.py` — ported unchanged from Project 1.
+- `src/integrators.py` — hand-implemented: `euler`, `midpoint`, `verlet`, `rk4`. Done, tested.
+- `src/expr.py` — math-expression parser/evaluator for `/arm_sim/integration_step`'s `function`
+  field. Done, tested (`tests/test_expr.py`).
+- `src/arm_sim_node.py` — currently just registers `/arm_sim/integration_step`; the live-arm
+  services will be added here.
+- `src/main.py` — wires `Registry` + `Gateway` + `arm_sim_node`; `make run`'s entry point.
+- `tests/client_helper.py` — reusable raw-socket TCP/JSON test client (ported from Project 1).
+- `tests/test_arm_sim_integration_step.py` — wire-level integration tests for the checkpoint
+  service against a real running gateway.
 
 ## Working on this repo (Plan → Implement → Audit → Test)
 
@@ -28,7 +43,7 @@ and `agent-notes/` for prior-phase context, rather than depending on conversatio
 3. **Audit** (`prompts/AUDIT.md`) — independently checks the implementation against the plan and spec, writes `agent-notes/AUDIT.md`. Does not fix anything.
 4. **Test** (`prompts/TEST.md`) — independently verifies behavior against the spec, writes `agent-notes/TEST_RESULTS.md`. Does not modify production code.
 
-## Target architecture (not yet built)
+## Target architecture
 
 - `src/registry.py`, `src/gateway.py` — ported from Project 1 (`~/A-Star-Path-Planning`), reused
   "unchanged" per spec. Generic topic/service registry + asyncio TCP/JSON gateway.
