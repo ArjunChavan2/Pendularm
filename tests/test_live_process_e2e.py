@@ -81,6 +81,20 @@ class _RawClient:
             if msg.get("op") == "service_response" and msg.get("id") == cid:
                 return msg
 
+    def subscribe(self, topic: str) -> None:
+        self._id += 1
+        self.send({"op": "subscribe", "topic": topic, "type": "std_msgs/Any", "id": f"e2e-sub-{self._id}"})
+
+    def recv_publish(self, topic: str, timeout: float = 5.0) -> dict:
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"no publish on {topic} within {timeout}s")
+            msg = self.recv_json(timeout=remaining)
+            if msg.get("op") == "publish" and msg.get("topic") == topic:
+                return msg
+
 
 @unittest.skipUnless(
     os.environ.get("PENDULARM_SKIP_E2E") != "1",
@@ -222,6 +236,46 @@ class TestLiveMakeRunProcess(unittest.TestCase):
             self.assertTrue(resp["values"]["data"])
             # restore for any later test ordering
             c.call_service("/arm_sim/pause", {"data": False})
+        finally:
+            c.close()
+
+    def test_joint_states_publishes_and_runtime_stays_responsive_with_unimplemented_arm_dynamics(self):
+        # src/arm_dynamics.py ships as an intentional stub (raises
+        # NotImplementedError every physics tick) until its owner
+        # hand-implements it -- confirms physics_loop's per-tick try/except
+        # (see arm_sim_node.py) keeps the real subprocess's gateway, other
+        # services, and /joint_states publication fully working despite
+        # that, rather than the live-arm addition silently regressing the
+        # already-passing checkpoint behavior or crashing the process.
+        c = _RawClient()
+        try:
+            c.subscribe("/joint_states")
+            # ack for the subscribe request itself, then several published
+            # /joint_states messages.
+            first = c.recv_publish("/joint_states", timeout=3.0)
+            second = c.recv_publish("/joint_states", timeout=3.0)
+
+            for msg in (first, second):
+                body = msg["msg"]
+                self.assertEqual(body["name"], ["joint1", "joint2", "joint3"])
+                self.assertEqual(len(body["position"]), 3)
+                self.assertEqual(len(body["velocity"]), 3)
+                self.assertEqual(len(body["effort"]), 3)
+                # arm_dynamics.forward_dynamics raises every tick, so the
+                # physics loop never successfully advances -- position and
+                # velocity stay frozen at the reset pose, not NaN/garbage
+                # and not silently missing.
+                self.assertEqual(body["position"], [0.0, 0.0, 0.0])
+                self.assertEqual(body["velocity"], [0.0, 0.0, 0.0])
+
+            # The rest of the runtime must stay fully responsive throughout.
+            resp = c.call_service("/arm_sim/integration_step", {
+                "function": "t", "x0": 0.0, "xdot0": 0.0, "dt": 0.1, "steps": 1, "integrator": "euler",
+            })
+            self.assertTrue(resp["result"], resp)
+
+            resp = c.call_service("/arm_sim/set_params", {})
+            self.assertTrue(resp["result"], resp)
         finally:
             c.close()
 

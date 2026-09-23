@@ -1,8 +1,11 @@
 """Project 2 runtime entry point (`make run`).
 
-Currently wires the Registry, TCP gateway, and the /arm_sim/integration_step
-checkpoint service. The live n-link arm (dynamics, PID, IK nodes) will be
-added here once arm_dynamics.py, pid.py, and kinematics.py exist.
+Wires the Registry, TCP gateway, the /arm_sim/integration_step checkpoint
+service and /arm_sim/* state services, and the live n-link arm's two
+background tasks (arm_sim_node.physics_loop, arm_sim_node.publish_loop),
+running concurrently with the gateway's own per-connection coroutines on the
+same asyncio event loop. PID and IK nodes will be added here once pid.py and
+kinematics.py exist.
 """
 from __future__ import annotations
 
@@ -24,10 +27,13 @@ async def run() -> None:
     log(f"ARM_SIM_LINKS={links}")
 
     registry = Registry()
-    arm_sim_node.register(registry, links)
+    state = arm_sim_node.register(registry, links)
 
     gateway = Gateway(registry)
     await gateway.start()
+
+    physics_task = asyncio.create_task(arm_sim_node.physics_loop(state))
+    publish_task = asyncio.create_task(arm_sim_node.publish_loop(registry, state))
 
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
@@ -41,6 +47,10 @@ async def run() -> None:
 
     await stop_event.wait()
     await gateway.stop()
+
+    for task in (physics_task, publish_task):
+        task.cancel()
+    await asyncio.gather(physics_task, publish_task, return_exceptions=True)
 
 
 def main() -> None:

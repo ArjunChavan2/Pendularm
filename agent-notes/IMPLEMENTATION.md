@@ -147,3 +147,149 @@ None — matches `agent-notes/PLAN.md`'s "Round 2" section.
   "lengths": [1.0, 1.0]}` (2-link) instead of `"no provider"`.
 - `submission.tar.gz` rebuilt and re-verified (fresh extraction, `make build`/`make test`/`make
   run`) after each change in this round before being sent to the user.
+
+---
+
+## Round 3 — `arm_dynamics.py` stub + live physics/publish loops (`agent-notes/PLAN.md`, this pass)
+
+Executes `agent-notes/PLAN.md`'s "Implementation steps" (all 9) in full: creates
+`src/arm_dynamics.py` as a documented stub, wires a live `physics_loop`/`publish_loop` pair into
+`src/arm_sim_node.py`, and starts/stops them as background asyncio tasks from `src/main.py`. Does
+**not** implement `arm_dynamics.py`'s Lagrangian derivation, `M`/`C`/`G`, or the linear-algebra
+solve — per the standing rule, that file is hand-implemented by the project owner; this pass only
+fixes its public contract (signature + full docstring) and raises `NotImplementedError` in the
+body, mirroring `src/integrators.py`'s original "STUB: implement this file yourself" framing.
+
+### What changed
+
+- **New** `src/arm_dynamics.py`: stub-only. Module docstring states ownership/scope; the single
+  public function `forward_dynamics(q, qdot, tau, gravity, masses, lengths) -> qddot` carries the
+  full contract/invariants from the plan's "Interfaces and data flow" section (verbatim) and
+  `raise NotImplementedError(...)` in the body. No `M`/`C`/`G` helpers, no solve step — nothing
+  beyond the signature and docstring was written.
+- **`src/arm_sim_node.py`**:
+  - `import arm_dynamics` alongside the existing `import integrators`; also now imports `asyncio`
+    and `gateway.log` (for `physics_loop`'s throttled failure logging).
+  - `_ArmSimState.__init__` gains `self.q = [0.0]*links`, `self.qdot = [0.0]*links`,
+    `self.sim_time = 0.0` (reset pose per the plan's "Open questions" section).
+  - New `_joint_names(links) -> list[str]`: `["joint1", "joint2"]` / `[..., "joint3"]`,
+    1-indexed, matching the spec's `/joint_trajectory` example.
+  - New `async def physics_loop(state)`: infinite loop, paces itself by re-reading
+    `state.integrator_timestep` before each `asyncio.sleep(...)` call; skips the integration step
+    (but keeps looping) while `state.paused`; otherwise builds a zero `tau`, closes over the
+    *current* `state.gravity`/`masses`/`lengths`/`links` in a per-tick `_accel_fn` matching
+    `integrators.AccelFn`'s `(t, q, qdot) -> qddot` shape, calls the *current*
+    `integrators.METHODS[state.integrator_method]`, writes the result back to `state.q`/`qdot`,
+    and advances `state.sim_time` by the `dt` actually used. The dynamics-call + integration step
+    is wrapped in `try/except Exception`, logging once via `gateway.log` on the first failure (and
+    silently retrying every subsequent tick without further log spam) — this is what keeps the
+    still-unimplemented `arm_dynamics.forward_dynamics`'s `NotImplementedError` from crashing the
+    task or flooding stderr.
+  - New `async def publish_loop(registry, state)`: infinite loop, `await asyncio.sleep(1/60)`
+    (module constant `PUBLISH_PERIOD_S`), builds `/joint_states` (`header.stamp` from
+    `state.sim_time`, `name` from `_joint_names`, `position`/`velocity` as fresh copies of
+    `state.q`/`qdot`, `effort` all-zero) and calls `registry.publish(...)` directly — entirely
+    independent of `state.paused` and `state.integrator_timestep`.
+  - `register(registry, links=2)` now constructs `state = _ArmSimState(links)` before registering
+    the four existing handlers (unchanged bodies, same `state` instance) and `return`s it, instead
+    of returning `None`.
+- **`src/main.py`**: `state = arm_sim_node.register(registry, links)` (captures the return value);
+  after `await gateway.start()`, `physics_task`/`publish_task` are created via
+  `asyncio.create_task(...)`; after `await stop_event.wait()` and `await gateway.stop()`, both
+  tasks are cancelled and awaited via `asyncio.gather(..., return_exceptions=True)` so shutdown
+  stays clean.
+- **New** `tests/test_arm_sim_physics_loop.py` (15 tests): unit-level wiring tests for
+  `physics_loop`/`publish_loop`, entirely independent of `arm_dynamics.forward_dynamics`'s real
+  (unimplemented) body — monkeypatches it with constant/recording stand-ins. Covers: calling
+  `integrators.METHODS[...]` with the right `(accel_fn, t, q, qdot, dt)` arguments; matching
+  hand-computed euler output; fresh (not cached) reads of `gravity`/`integrator_method`/
+  `integrator_timestep` each tick, including via the real `set_params`/`set_integrator` handler
+  methods mid-run; skip-while-paused and resume-from-where-it-left-off semantics; that the *real*,
+  unmodified `arm_dynamics.forward_dynamics` (still raising `NotImplementedError`) is caught and
+  the loop keeps ticking without crashing or applying a partial step; `/joint_states` message
+  shape/content/naming (2- and 3-link) and its fixed-rate, `paused`-independent,
+  `integrator_timestep`-independent publish cadence; `register()`'s return value.
+- **Extended** `tests/test_live_process_e2e.py`: added `subscribe`/`recv_publish` methods to
+  `_RawClient`, and one new test,
+  `test_joint_states_publishes_and_runtime_stays_responsive_with_unimplemented_arm_dynamics` —
+  subscribes to `/joint_states` on the real 3-link `make run` subprocess, confirms messages arrive
+  with the correct shape and (since the real, unimplemented `arm_dynamics.py` raises every tick)
+  values frozen at the reset pose `[0.0, 0.0, 0.0]`, then confirms `/arm_sim/integration_step` and
+  `/arm_sim/set_params` still respond normally afterward. The existing
+  `test_zz_clean_sigterm_shutdown_of_underlying_python_process` (unmodified) now doubles as the
+  clean-shutdown regression check for the two new background tasks — it already passed against
+  this round's changes without modification, confirming `main.py`'s new cancel-and-await logic
+  doesn't reintroduce a shutdown hang or traceback.
+
+### Important implementation decisions
+
+- **Deterministic async tests via a counting `asyncio.sleep` stand-in.** Rather than waiting on
+  real wall-clock time (flaky and slow for an infinite `while True` loop), each `physics_loop`/
+  `publish_loop` unit test monkeypatches `asyncio.sleep` with a stand-in that records each
+  requested `dt`, lets a chosen exact number of iterations complete, and then ends the loop by
+  raising `asyncio.CancelledError` from inside the awaited sleep — exactly how real task
+  cancellation would terminate it, so the loop under test exits through its normal code path, not
+  a special test-only escape hatch. An `on_tick(count)` callback fires once per completed
+  iteration (after that iteration's `dt` is recorded, before the loop body resumes), letting tests
+  mutate `state` mid-run to prove fresh (non-cached) reads — including via a subtlety worth noting
+  for future edits to this test file: since `dt` is captured *before* `asyncio.sleep` is called
+  each iteration but `gravity`/`integrator_method`/`paused` are read *after* it returns, an
+  `on_tick(k)` mutation is visible to iteration `k`'s own body for the latter fields, but only
+  takes effect starting at iteration `k+1` for pacing (`dt`) — this matches the plan's own stated
+  edge case ("the iteration currently mid-sleep still completes with the previously-read
+  interval") and is not a test bug; the tests' `on_tick` trigger points were chosen accordingly.
+- **Exception throttling: log once, then retry silently.** Per the plan's explicitly-open choice
+  ("log once... or log at a throttled rate — either acceptable"), `physics_loop` logs the first
+  `forward_dynamics`/integration failure via `gateway.log` and sets a flag so subsequent identical
+  failures (guaranteed every tick while `arm_dynamics.py` is unimplemented) don't spam stderr,
+  while still retrying every tick afterward (so a future fix to `arm_dynamics.py` starts working
+  immediately, with no restart needed).
+- **`register()`'s new return value is additive, not a signature break for existing callers**:
+  every existing call site (`main.py`, all four existing test modules) either already captured no
+  return value (fine, since `None` becoming `_ArmSimState` doesn't break an ignored return) or is
+  this round's own new code.
+
+### Deviations from the plan
+
+None. All 9 implementation steps were followed as specified; the `arm_dynamics.py` contract,
+`_accel_fn` closure shape, message shapes, and edge-case handling all match the plan's "Interfaces
+and data flow" / "Edge cases and failure modes" sections without modification.
+
+### Known limitations or unresolved questions
+
+- `src/arm_dynamics.py` is still an intentional stub (`NotImplementedError`) — the live arm cannot
+  actually move under gravity yet; this is expected and explicitly out of scope for an agent to
+  fix (see the standing rule). Until the project owner hand-implements it, `/joint_states` will
+  keep publishing the frozen reset pose, exactly as this round's own tests lock in.
+- `/pid_controller/*`, `/arm_sim/reset`, `/joint_trajectory`, `kinematics.py`, and all `/ik/*`
+  nodes remain unbuilt — unchanged from before this pass, and explicitly out of scope per
+  `agent-notes/PLAN.md`'s "Scope of this pass."
+- `tau` is hard-coded to the zero vector in `physics_loop` (PID not wired in yet, per plan) — the
+  single-line substitution point for a future `pid.py` is the `_accel_fn` closure inside
+  `physics_loop`.
+- The plan's "Physics loop pacing" open question (coupling physics wall-clock rate 1:1 to
+  `integrator_timestep` rather than a fixed-quantum accumulator) was implemented as specified;
+  revisiting it, if a future pass finds it behaves poorly at extreme `dt`, is flagged there as a
+  plausible future extension, not something this pass changed.
+
+### Checks performed
+
+- `make build` — clean compile of all `src/*.py`, including the new `arm_dynamics.py` stub.
+- `make test` — 91/91 passing (75 pre-existing + 15 new `tests/test_arm_sim_physics_loop.py` + 1
+  new `tests/test_live_process_e2e.py` test), including the real-subprocess E2E module
+  (`PENDULARM_SKIP_E2E` unset).
+- Live smoke test against a real `make build && make run` (`ARM_SIM_LINKS=2`): a raw Python TCP
+  client subscribed to `/joint_states` and received continuous messages (~60 Hz) shaped
+  `{"header": {...}, "name": ["joint1","joint2"], "position": [0.0,0.0], "velocity": [0.0,0.0],
+  "effort": [0.0,0.0]}`; confirmed `/arm_sim/integration_step` and `/arm_sim/set_params` responded
+  normally throughout; confirmed the process's stderr log contained exactly one graceful
+  `physics_loop: tick failed, arm frozen until this is resolved (NotImplementedError(...))` line
+  (not a traceback, not repeated every tick); sent `SIGTERM` and confirmed no traceback, prompt
+  exit, and port 9095 released (`lsof -iTCP:9095 -sTCP:LISTEN` empty afterward).
+- `submission.tar.gz` rebuilt (`tar czf ... Makefile README.md .gitignore src tests`, entries
+  listed by name, no bare `.` — verified via `tar tzf | sort`) and re-verified from a fresh
+  extraction under `/tmp`: `make build` and `make test` both passed (91/91) against the extracted
+  copy, independent of the working tree.
+- No stray `python3 src/main.py` processes or port-9095 listeners left behind after any manual
+  smoke test (checked via `lsof -iTCP:9095 -sTCP:LISTEN` and `ps aux | grep src/main.py` before
+  finishing).
