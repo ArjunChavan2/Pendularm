@@ -1,7 +1,10 @@
-# Implementation — Project 2 checkpoint: `/arm_sim/integration_step`
+# Implementation — Project 2 checkpoint: `/arm_sim/integration_step` + `/arm_sim/*` state services
 
 **Note:** written retroactively, after implementation, at the user's request — see
-`agent-notes/PLAN.md` for the same caveat.
+`agent-notes/PLAN.md` for the same caveat. Covers two rounds; see "Round 2" below for the
+domain-safety fixes and the three new state-storage services. `agent-notes/TEST_RESULTS.md` is the
+current, up-to-date verification record covering both rounds — this file and `AUDIT.md` are
+historical/point-in-time.
 
 ## What changed
 
@@ -77,3 +80,70 @@ None — the plan (written after the fact, see its own caveat) matches what was 
   `test_arm_sim_integration_step.py` run to fail with `OSError: address already in use` on every
   test in that module (all failing with a misleading "no provider" status, since the test's own
   server never actually started). Killed the stray process; re-ran clean.
+
+---
+
+## Round 2 — domain-safety fixes + `/arm_sim/set_params`, `/arm_sim/set_integrator`, `/arm_sim/pause`
+
+### What changed
+
+- **`src/expr.py`**: added `_safe_pow(base, exponent)` (catches `ZeroDivisionError` for
+  `0**negative` → `inf`; catches `OverflowError` for a too-large result → signed `inf`; checks
+  `isinstance(result, complex)` for a negative base / non-integer exponent → `nan`) and
+  `_safe_trig(fn)` (a wrapper checking `math.isfinite` before calling `sin`/`cos`/`tan`, returning
+  `nan` for non-finite input instead of letting `ValueError` propagate). Wired `_safe_pow` into
+  `_combine`'s `"^"` branch and `_safe_trig` into `_FUNCTIONS`' `sin`/`cos`/`tan` entries.
+- **`src/arm_sim_node.py`**: added `_ArmSimState` (holds `links`, `gravity`, `masses`, `lengths`,
+  `integrator_method`, `integrator_timestep`, `paused`) with three methods —
+  `set_params`/`set_integrator`/`pause` — each validating/applying its request fields
+  independently and always echoing current (post-update) values. `register(registry, links=2)`
+  now takes a `links` parameter and registers these three alongside the existing
+  `/arm_sim/integration_step`.
+- **`src/main.py`**: now converts the validated `ARM_SIM_LINKS` string to an `int` and passes it
+  to `arm_sim_node.register(registry, links)`.
+- **New** `tests/test_arm_sim_state_services.py` (18 tests): the empty-`{}`-query convention,
+  independent-field validation (an invalid field doesn't block other valid fields in the same
+  request), rejection cases, and both 2-link and 3-link configurations.
+- **New regression tests** in `tests/test_expr.py` for each of `AUDIT.md`'s specific reproduction
+  cases (`(-4)^0.5`, `0^-1`, `t^1000` at `t=500`, `sin(1/t)` at `t=0`).
+- A subsequent, independent Test phase (see `agent-notes/TEST_RESULTS.md`) added
+  `tests/test_live_process_e2e.py` (7 tests) re-verifying all of the above over a genuine `make
+  run` OS subprocess with a from-scratch TCP client, independent of the existing in-process test
+  harness. Combined suite: 75 tests, all passing.
+
+### Important implementation decisions
+
+- **`_safe_pow`'s overflow sign handling**: for a negative base overflowing to infinite magnitude,
+  the sign of the result depends on whether the exponent is an odd integer (mirroring how a finite
+  negative-base odd-integer power would be negative). This is a simplification — it doesn't
+  attempt to handle every theoretically possible edge case (e.g. overflow combined with a
+  complex-producing fractional exponent), which is an accepted, documented gap given the spec's
+  own "no need to special-case" latitude on domain errors.
+- **Reused `_is_number` and independent-per-field validation** from `_integration_step` for the
+  new state services, keeping the validation style consistent across all of `arm_sim_node.py`
+  rather than introducing a second pattern.
+
+### Deviations from the plan
+
+None — matches `agent-notes/PLAN.md`'s "Round 2" section.
+
+### Known limitations or unresolved questions
+
+- `/arm_sim/reset` is still not built (needs PID controller state per spec).
+- The live n-link arm (`arm_dynamics.py`, `pid.py`, `/joint_trajectory`, `/joint_states`) and IK
+  are still not built — `ARM_SIM_LINKS`/the new state services' stored values aren't consumed by
+  anything yet.
+- Whether the grader's startup probe checks *only* `/arm_sim/set_params`, or other `/arm_sim/*`
+  endpoints too (e.g. `/arm_sim/reset`), wasn't confirmed against the actual grader beyond the one
+  error message the user shared — a re-submission is the only way to know for certain.
+
+### Checks performed
+
+- `make build`, `make test` — 75/75 passing (see `agent-notes/TEST_RESULTS.md` for the full
+  independent-Test-phase breakdown).
+- Live smoke tests over a real `make run` subprocess: each of Audit's exact reproduction strings
+  confirmed to now return `result:true` with NaN/inf values instead of hanging or being rejected;
+  `/arm_sim/set_params` empty-query confirmed to echo `{"gravity": 9.81, "masses": [1.0, 1.0],
+  "lengths": [1.0, 1.0]}` (2-link) instead of `"no provider"`.
+- `submission.tar.gz` rebuilt and re-verified (fresh extraction, `make build`/`make test`/`make
+  run`) after each change in this round before being sent to the user.

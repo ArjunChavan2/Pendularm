@@ -1,5 +1,13 @@
 # Audit — Project 2 checkpoint: `/arm_sim/integration_step`
 
+> **STATUS: findings below are historical.** Every finding in this document (the `^` operator
+> hang, the `0^-1`/overflow rejections, the `sin`/`cos`/`tan`-of-infinity rejections) was fixed in
+> a subsequent round of work and independently re-verified — both the fixes themselves and a
+> dedicated regression test per finding — by a separate Test phase. See
+> `agent-notes/TEST_RESULTS.md` (current, up to date) and `agent-notes/IMPLEMENTATION.md`'s "Round
+> 2" section for what changed. The findings are left unedited below as the original audit record,
+> not because the bugs are still present.
+
 Scope: `src/registry.py`, `src/gateway.py`, `src/expr.py`, `src/arm_sim_node.py`, `src/main.py`,
 `tests/client_helper.py`, `tests/test_expr.py`, `tests/test_arm_sim_integration_step.py`, and how
 these correctly (or incorrectly) integrate with `src/integrators.py`'s already-verified interface.

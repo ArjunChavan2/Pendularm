@@ -1,8 +1,12 @@
-# Plan — Project 2 checkpoint: `/arm_sim/integration_step`
+# Plan — Project 2 checkpoint: `/arm_sim/integration_step` + `/arm_sim/*` state services
 
 **Note:** written retroactively, after implementation, at the user's request — this documents the
 decisions actually made, not a plan produced before the code existed. Future work on this repo
-should run the real Plan → Implement cycle from the start (see `prompts/PLAN.md`).
+should run the real Plan → Implement cycle from the start (see `prompts/PLAN.md`). This file
+covers two rounds of work: the original checkpoint (below), and a second round (see "Round 2")
+that fixed `agent-notes/AUDIT.md`'s findings and added `/arm_sim/set_params`,
+`/arm_sim/set_integrator`, `/arm_sim/pause`. `agent-notes/TEST_RESULTS.md` is the current,
+up-to-date verification record covering both rounds.
 
 ## Goal
 
@@ -121,3 +125,67 @@ external client --call_service--> gateway.py --> registry.py (in-process handler
   defaulting, each rejection case, and responsiveness after a bad request.
 - A genuine `make build && make run`, live TCP calls from a separate client process, and a clean
   `SIGTERM` shutdown — not just unit tests in-process.
+
+---
+
+## Round 2 — domain-safety fixes + `/arm_sim/set_params`, `/arm_sim/set_integrator`, `/arm_sim/pause`
+
+**Note:** also written retroactively, after this round's implementation.
+
+### Goal
+
+Two triggers, addressed together:
+1. `agent-notes/AUDIT.md` (independent Audit phase against Round 1) found that `expr.py`'s
+   domain-safety guarantee was only partially implemented — the `^` operator and `sin`/`cos`/`tan`
+   had no guards, and one case (`(-4)^0.5`) caused a genuine hang.
+2. The user reported a real autograder failure: the grading harness's startup probe calls
+   `/arm_sim/set_params` with an empty `{}` query and expects an echo of current parameters within
+   a startup deadline; with no provider registered for that service, it got `result:false,
+   status:"no provider"` and the whole run failed before any category-specific grading happened.
+
+### Relevant requirements
+
+- `expr.py`: same "domain errors at evaluation time become NaN/inf, never raise" requirement as
+  Round 1 — Round 1 only partially satisfied it.
+- `/arm_sim/set_params` — `{"gravity": <>=0>, "masses": [n values, each >0], "lengths": [n values,
+  each >0]}` (`n` = link count from `ARM_SIM_LINKS`; gravity defaults 9.81). Every field optional;
+  response always echoes current post-update parameters, even when the request changed nothing or
+  was rejected outright; each field validated/rejected independently, without disturbing other
+  valid fields in the same request.
+- `/arm_sim/set_integrator` — `{"method": "euler"|"midpoint"|"verlet"|"rk4", "timestep": <positive
+  seconds>}`. An unrecognized method or non-positive timestep must be rejected, not silently
+  defaulted.
+- `/arm_sim/pause` — `{"data": <bool>}`. Freezes/resumes the simulation clock (no live physics loop
+  exists yet to actually freeze, so this is currently just state storage).
+- `/arm_sim/reset` is explicitly NOT in scope for this round — the spec ties it to also resetting
+  PID controller state, which doesn't exist yet.
+
+### Proposed architecture
+
+- Add `_safe_pow` (catches `ZeroDivisionError`/`OverflowError`/complex results from `**`) and
+  `_safe_trig` (guards `sin`/`cos`/`tan` against non-finite input) to `expr.py`, wired into
+  `_combine`'s `"^"` branch and `_FUNCTIONS`.
+- Add an `_ArmSimState` class to `arm_sim_node.py` holding `gravity`/`masses`/`lengths`/
+  `integrator_method`/`integrator_timestep`/`paused`, with one method per new service implementing
+  the independent-per-field validation pattern. `register(registry, links)` now takes the link
+  count (previously just `register(registry)`), threaded from `main.py`'s already-parsed
+  `ARM_SIM_LINKS`.
+
+### Open questions and assumptions
+
+- No literal defaults are spec-given for `masses`/`lengths`/integrator method/timestep (only
+  `gravity=9.81` is spec-stated) — assumed `masses`/`lengths` default to `1.0` per link,
+  `integrator` defaults to `"euler"` with `timestep=0.01`.
+- `/arm_sim/set_integrator`'s two fields are validated/applied independently (matching the
+  family-wide "every field optional and independently applied" convention stated up front in the
+  spec), even though the spec's own `set_integrator` paragraph phrases rejection singularly
+  ("reject it") rather than "independently" the way `set_params` does explicitly — documented as
+  an assumption, not a certainty.
+
+### Verification strategy
+
+- Regression tests in `tests/test_expr.py` for each of the Audit's specific reproduction cases.
+- New `tests/test_arm_sim_state_services.py` covering the empty-query convention,
+  independent-field validation, and both 2-link and 3-link configurations.
+- A dedicated, independent Test phase (see `agent-notes/TEST_RESULTS.md`) re-verifying all of the
+  above directly against the current code rather than trusting this plan or the Audit findings.
