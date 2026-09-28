@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pendularm Visualizer</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #1d2330; --muted: #6b7385; --line: #dfe3ea;
+    --grid: #e9ecf1; --reach: #b9c0cc; --trail: #b79ce0; --joint: #2b3140;
+    --l1: #4c78a8; --l2: #f58518; --l3: #54a24b;
+    --active: #d32f2f; --reached: #2e7d32; --ke: #e45756; --pe: #4c78a8; --tot: #1d2330; --preempted: #9e9e9e; --err: #b00020; --accent: #3b5bdb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151b; --panel: #1b1f27; --ink: #e6e9ef; --muted: #9aa3b5; --line: #2c323d;
+      --grid: #232833; --reach: #4a5263; --trail: #7d63b0; --joint: #dfe3ea;
+      --l1: #6b9bd1; --l2: #ff9f40; --l3: #6fc265;
+      --active: #ff6b6b; --reached: #5bd06a; --ke: #ff7b7b; --pe: #6b9bd1; --tot: #e6e9ef; --preempted: #7d8594; --err: #ff6b81; --accent: #7c95ff;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  main { display: flex; flex-wrap: wrap; gap: 16px; padding: 16px; justify-content: center; }
+  .stage { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px;
+           width: min(680px, 100%); }
+  canvas { width: 100%; aspect-ratio: 1; display: block; cursor: crosshair; touch-action: none; }
+  aside { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px;
+          width: min(300px, 100%); display: flex; flex-direction: column; gap: 12px; }
+  h1 { font-size: 16px; margin: 0; }
+  .conn { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--err); }
+  .dot.on { background: var(--reached); }
+  .fields { display: grid; grid-template-columns: auto 1fr; gap: 6px 8px; align-items: center; }
+  label { color: var(--muted); font-size: 13px; }
+  input[type=number] { width: 100%; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line);
+                       background: var(--bg); color: var(--ink); font: inherit; }
+  .check { display: flex; gap: 6px; align-items: center; color: var(--muted); font-size: 13px; }
+  button { padding: 8px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg);
+           color: var(--ink); font: inherit; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  pre { margin: 0; font: 12px/1.6 ui-monospace, Menlo, monospace; color: var(--ink); white-space: pre-wrap; }
+  .msg { color: var(--err); font-size: 13px; min-height: 1.2em; }
+  .hint { color: var(--muted); font-size: 12px; }
+  .col { display: flex; flex-direction: column; gap: 16px; width: min(680px, 100%); }
+  .col .stage { width: 100%; }
+  h2 { font-size: 13px; margin: 4px 0 0; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  select { width: 100%; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line);
+           background: var(--bg); color: var(--ink); font: inherit; }
+  .slider { display: grid; grid-template-columns: 28px 1fr 44px; gap: 8px; align-items: center; font-size: 13px; }
+  .slider output { text-align: right; font: 12px ui-monospace, Menlo, monospace; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  #energy { width: 100%; height: 170px; display: block; }
+  .legend { display: flex; gap: 14px; font-size: 12px; color: var(--muted); padding: 4px 6px 0; flex-wrap: wrap; }
+  .legend i { display: inline-block; width: 10px; height: 3px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
+</style>
+</head>
+<body>
+<main>
+  <div class="col">
+    <div class="stage"><canvas id="c"></canvas></div>
+    <div class="stage">
+      <canvas id="energy"></canvas>
+      <div class="legend">
+        <span><i style="background:var(--ke)"></i>kinetic</span>
+        <span><i style="background:var(--pe)"></i>potential</span>
+        <span><i style="background:var(--tot)"></i>total</span>
+        <span id="drift"></span>
+      </div>
+      <div class="hint" style="padding:4px 6px 2px">Energy is only conserved with PID off (the motor adds and removes energy).
+        Disable PID, then compare integrators: Euler drifts, Verlet stays in a bounded band.</div>
+    </div>
+  </div>
+  <aside>
+    <h1>Pendularm</h1>
+    <div class="conn"><span id="dot" class="dot"></span><span id="conn">connecting…</span></div>
+    <div class="hint">Click the canvas to send the arm there, or type a target.</div>
+    <div class="fields">
+      <label for="x">x (m)</label><input id="x" type="number" step="0.1" value="1.0">
+      <label for="y">y (m)</label><input id="y" type="number" step="0.1" value="1.0">
+      <label for="phi">φ (rad)</label><input id="phi" type="number" step="0.1" value="0.0">
+    </div>
+    <label class="check"><input id="usePhi" type="checkbox"> use φ (3-link only)</label>
+    <button id="go" class="primary">Go</button>
+    <div class="row">
+      <button id="pid">Enable PID</button>
+      <button id="reset">Reset arm</button>
+    </div>
+    <button id="clear">Clear trail</button>
+    <h2>Integrator</h2>
+    <div class="fields">
+      <label for="method">method</label>
+      <select id="method"><option>euler</option><option>midpoint</option><option>verlet</option><option>rk4</option></select>
+      <label for="dt">dt (s)</label><input id="dt" type="number" step="0.001" min="0.0005" value="0.01">
+    </div>
+    <h2>PID gains (all joints)</h2>
+    <div class="slider"><span>kp</span><input id="kp" type="range" min="0" max="400" step="5"><output id="kpv"></output></div>
+    <div class="slider"><span>ki</span><input id="ki" type="range" min="0" max="150" step="1"><output id="kiv"></output></div>
+    <div class="slider"><span>kd</span><input id="kd" type="range" min="0" max="60" step="0.5"><output id="kdv"></output></div>
+    <div id="msg" class="msg"></div>
+    <pre id="info"></pre>
+  </aside>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const canvas = $("c"), ctx = canvas.getContext("2d");
+const S = { connected: false, lengths: [], q: [], effort: [], t: 0, pid: false,
+            target: null, status: "idle", dist: null, trail: [],
+            masses: null, gravity: 9.81, energy: [] };
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+
+async function call(service, args = {}) {
+  try {
+    const r = await fetch("/call", { method: "POST", headers: { "Content-Type": "application/json" },
+                                     body: JSON.stringify({ service, args }) });
+    return r.ok ? await r.json() : { result: false, status: `HTTP ${r.status}` };
+  } catch (e) { return { result: false, status: String(e) }; }
+}
+
+async function refreshParams() {
+  const r = await call("/arm_sim/set_params", {});
+  if (r.result && r.values && r.values.lengths) {
+    S.lengths = r.values.lengths; S.masses = r.values.masses; S.gravity = r.values.gravity;
+  }
+  $("usePhi").disabled = S.lengths.length !== 3;
+}
+
+// ---- integrator + gains ----
+async function refreshIntegrator() {
+  const r = await call("/arm_sim/set_integrator", {});
+  if (r.result) { $("method").value = r.values.method; $("dt").value = r.values.timestep; }
+}
+async function applyIntegrator() {
+  const dt = parseFloat($("dt").value);
+  const r = await call("/arm_sim/set_integrator", { method: $("method").value, timestep: dt });
+  $("msg").textContent = r.result ? "" : r.status;
+  S.energy = [];   // a new method/timestep starts a fresh energy trace
+  refreshIntegrator();
+}
+function showGains() { ["kp", "ki", "kd"].forEach(k => $(k + "v").textContent = $(k).value); }
+async function refreshGains() {
+  const r = await call("/pid_controller/set_gains", {});
+  if (r.result) ["kp", "ki", "kd"].forEach(k => { if (r.values[k]) $(k).value = r.values[k][0]; });
+  showGains();
+}
+async function applyGain(k) {
+  showGains();
+  const n = S.lengths.length || 1, v = parseFloat($(k).value);
+  const r = await call("/pid_controller/set_gains", { [k]: Array(n).fill(v) });
+  $("msg").textContent = r.result ? "" : r.status;
+}
+
+// ---- energy: T = sum 1/2 m|v_com|^2 + 1/2 (m l^2/12) w^2,  V = sum m g y_com  (uniform rods) ----
+function comPositions(q) {
+  const out = []; let jx = 0, jy = 0, phi = 0;
+  q.forEach((qi, i) => {
+    phi += qi; const l = S.lengths[i];
+    out.push([jx + 0.5 * l * Math.cos(phi), jy + 0.5 * l * Math.sin(phi)]);
+    jx += l * Math.cos(phi); jy += l * Math.sin(phi);
+  });
+  return out;
+}
+function energy(q, qd) {
+  const e = 1e-6, pp = comPositions(q.map((v, i) => v + e * qd[i])), pm = comPositions(q.map((v, i) => v - e * qd[i]));
+  const p = comPositions(q); let T = 0, V = 0, w = 0;
+  q.forEach((_, k) => {
+    const m = S.masses[k], l = S.lengths[k];
+    const vx = (pp[k][0] - pm[k][0]) / (2 * e), vy = (pp[k][1] - pm[k][1]) / (2 * e);
+    w += qd[k];
+    T += 0.5 * m * (vx * vx + vy * vy) + 0.5 * (m * l * l / 12) * w * w;
+    V += m * S.gravity * p[k][1];
+  });
+  return [T, V];
+}
+function drawEnergy() {
+  const c = $("energy"), g = c.getContext("2d"), dpr = window.devicePixelRatio || 1;
+  const w = c.clientWidth, h = c.clientHeight;
+  if (c.width !== Math.round(w * dpr)) { c.width = Math.round(w * dpr); c.height = Math.round(h * dpr); }
+  g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
+  const pts = S.energy;
+  if (pts.length < 2) {
+    g.fillStyle = css("--muted"); g.font = "12px sans-serif"; g.fillText("energy trace appears once the arm moves", 10, 20);
+    $("drift").textContent = ""; return;
+  }
+  const t0 = pts[0][0], t1 = pts.at(-1)[0], span = Math.max(t1 - t0, 1e-6);
+  let lo = Infinity, hi = -Infinity;
+  pts.forEach(([, T, V]) => { lo = Math.min(lo, T, V, T + V); hi = Math.max(hi, T, V, T + V); });
+  const pad = (hi - lo) * 0.1 || 1; lo -= pad; hi += pad;
+  const X = t => 36 + (t - t0) / span * (w - 44), Y = v => 8 + (hi - v) / (hi - lo) * (h - 24);
+  g.strokeStyle = css("--grid"); g.lineWidth = 1; g.beginPath(); g.moveTo(36, Y(0)); g.lineTo(w - 8, Y(0)); g.stroke();
+  g.fillStyle = css("--muted"); g.font = "10px ui-monospace, Menlo, monospace";
+  g.fillText(hi.toFixed(1), 2, 14); g.fillText(lo.toFixed(1), 2, h - 16); g.fillText(`${span.toFixed(1)} s`, w - 44, h - 2);
+  [["--ke", p => p[1]], ["--pe", p => p[2]], ["--tot", p => p[1] + p[2]]].forEach(([col, f]) => {
+    g.strokeStyle = css(col); g.lineWidth = col === "--tot" ? 2 : 1.5; g.beginPath();
+    pts.forEach((p, i) => i ? g.lineTo(X(p[0]), Y(f(p))) : g.moveTo(X(p[0]), Y(f(p)))); g.stroke();
+  });
+  const e0 = pts[0][1] + pts[0][2], e1 = pts.at(-1)[1] + pts.at(-1)[2];
+  $("drift").textContent = `total drift ${(e1 - e0 >= 0 ? "+" : "") + (e1 - e0).toFixed(3)} J over ${span.toFixed(1)} s`;
+}
+async function refreshPid() {
+  const r = await call("/pid_controller/enable", {});
+  if (r.result) S.pid = !!r.values.data;
+  renderPanel();
+}
+async function setPid(on) {
+  const r = await call("/pid_controller/enable", { data: on });
+  if (r.result) S.pid = !!r.values.data; else $("msg").textContent = r.status;
+  renderPanel();
+}
+
+async function sendGoal(x, y) {
+  const args = { x, y };
+  if ($("usePhi").checked && S.lengths.length === 3) {
+    const p = parseFloat($("phi").value);
+    if (!Number.isFinite(p)) { $("msg").textContent = "φ must be a number"; return; }
+    args.phi = p;
+  }
+  if (!S.pid) await setPid(true);          // the controller has to be on for the arm to get there
+  $("x").value = x.toFixed(3); $("y").value = y.toFixed(3);
+  const r = await call("/ik_action/send_goal", args);
+  if (r.result) { S.target = args; S.status = "active"; S.dist = null; $("msg").textContent = ""; }
+  else $("msg").textContent = "Rejected: " + (r.status || "unknown reason");
+}
+
+// ---- live data ----
+function connectEvents() {
+  const es = new EventSource("/events");
+  es.onmessage = ev => {
+    const m = JSON.parse(ev.data);
+    if (m.op === "bridge") {
+      S.connected = m.connected;
+      if (m.connected) { refreshParams(); refreshPid(); refreshIntegrator(); refreshGains(); }
+      renderPanel();
+      return;
+    }
+    const b = m.msg || {};
+    if (m.topic === "/joint_states") {
+      S.q = b.position || []; S.effort = b.effort || [];
+      const st = (b.header || {}).stamp || {};
+      const t = (st.sec || 0) + (st.nanosec || 0) * 1e-9;
+      if (t < S.t) S.energy = [];            // sim time went backwards: /arm_sim/reset
+      S.t = t;
+      const qd = b.velocity || [];
+      if (S.masses && S.q.length === S.lengths.length && qd.length === S.q.length) {
+        const [T, V] = energy(S.q, qd);
+        if (Number.isFinite(T + V)) {
+          S.energy.push([t, T, V]);
+          while (S.energy.length && t - S.energy[0][0] > 30) S.energy.shift();   // last 30 s of sim time
+        }
+      }
+      if (S.lengths.length && S.q.length === S.lengths.length) {
+        S.trail.push(joints().at(-1));
+        if (S.trail.length > 400) S.trail.shift();
+      }
+    } else if (m.topic === "/ik_action/feedback") {
+      S.dist = b.distance_remaining;
+    } else if (m.topic === "/ik_action/result") {
+      S.status = b.outcome; S.dist = b.final_distance;
+    }
+  };
+  es.onerror = () => { S.connected = false; renderPanel(); };
+}
+
+// ---- geometry ----
+function joints() {
+  const pts = [[0, 0]]; let x = 0, y = 0, phi = 0;
+  S.q.forEach((qi, i) => { phi += qi; x += S.lengths[i] * Math.cos(phi); y += S.lengths[i] * Math.sin(phi); pts.push([x, y]); });
+  return pts;
+}
+function view() {
+  const w = canvas.clientWidth, reach = S.lengths.reduce((a, b) => a + b, 0) || 3;
+  return { w, mid: w / 2, scale: (w / 2 - 24) / reach };
+}
+const toPx = (v, x, y) => [v.mid + x * v.scale, v.mid - y * v.scale];
+
+canvas.addEventListener("pointerdown", e => {
+  if (!S.connected) return;
+  const r = canvas.getBoundingClientRect(), v = view();
+  sendGoal((e.clientX - r.left - v.mid) / v.scale, (v.mid - (e.clientY - r.top)) / v.scale);
+});
+
+// ---- drawing ----
+function draw() {
+  const dpr = window.devicePixelRatio || 1, v = view();
+  if (canvas.width !== Math.round(v.w * dpr)) { canvas.width = canvas.height = Math.round(v.w * dpr); }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, v.w, v.w);
+  ctx.lineCap = "round";
+  ctx.strokeStyle = css("--grid"); ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0, v.mid); ctx.lineTo(v.w, v.mid); ctx.moveTo(v.mid, 0); ctx.lineTo(v.mid, v.w); ctx.stroke();
+
+  if (!S.lengths.length) {
+    ctx.fillStyle = css("--muted"); ctx.textAlign = "center"; ctx.font = "14px sans-serif";
+    ctx.fillText(S.connected ? "loading…" : "waiting for simulator (make run)…", v.mid, v.mid - 12);
+    return requestAnimationFrame(draw);
+  }
+  // reachable workspace: annulus between min and max reach
+  const outer = S.lengths.reduce((a, b) => a + b, 0), longest = Math.max(...S.lengths);
+  const inner = Math.max(0, longest - (outer - longest));
+  ctx.strokeStyle = css("--reach");
+  [[outer, []], [inner, [4, 4]]].forEach(([r, dash]) => {
+    if (r <= 0) return;
+    ctx.setLineDash(dash); ctx.beginPath(); ctx.arc(v.mid, v.mid, r * v.scale, 0, 2 * Math.PI); ctx.stroke();
+  });
+  ctx.setLineDash([]);
+
+  if (S.trail.length > 1) {
+    ctx.strokeStyle = css("--trail"); ctx.lineWidth = 2; ctx.beginPath();
+    S.trail.forEach(([x, y], i) => { const [px, py] = toPx(v, x, y); i ? ctx.lineTo(px, py) : ctx.moveTo(px, py); });
+    ctx.stroke();
+  }
+  if (S.target) {
+    const [tx, ty] = toPx(v, S.target.x, S.target.y);
+    const col = css(S.status === "reached" ? "--reached" : S.status === "preempted" ? "--preempted" : "--active");
+    ctx.strokeStyle = col; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(tx, ty, 0.05 * v.scale, 0, 2 * Math.PI); ctx.stroke();
+    ctx.lineWidth = 2.5; ctx.beginPath();
+    ctx.moveTo(tx - 7, ty - 7); ctx.lineTo(tx + 7, ty + 7); ctx.moveTo(tx - 7, ty + 7); ctx.lineTo(tx + 7, ty - 7); ctx.stroke();
+    if ("phi" in S.target) {
+      const p = S.target.phi, ex = tx + 28 * Math.cos(p), ey = ty - 28 * Math.sin(p);
+      ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(ex, ey); ctx.stroke();
+      ctx.beginPath(); ctx.arc(ex, ey, 3, 0, 2 * Math.PI); ctx.fillStyle = col; ctx.fill();
+    }
+  }
+  if (S.q.length === S.lengths.length) {
+    const pts = joints().map(([x, y]) => toPx(v, x, y)), cols = ["--l1", "--l2", "--l3"];
+    for (let i = 0; i < pts.length - 1; i++) {
+      ctx.strokeStyle = css(cols[i % 3]); ctx.lineWidth = 10;
+      ctx.beginPath(); ctx.moveTo(...pts[i]); ctx.lineTo(...pts[i + 1]); ctx.stroke();
+    }
+    ctx.fillStyle = css("--joint");
+    pts.forEach(([px, py], i) => { ctx.beginPath(); ctx.arc(px, py, i === pts.length - 1 ? 4 : 6, 0, 2 * Math.PI); ctx.fill(); });
+  }
+  renderPanel();
+  drawEnergy();
+  requestAnimationFrame(draw);
+}
+
+function renderPanel() {
+  $("dot").className = "dot" + (S.connected ? " on" : "");
+  $("conn").textContent = S.connected ? "connected to simulator" : "simulator not running — start it with make run";
+  $("pid").textContent = S.pid ? "Disable PID" : "Enable PID";
+  ["go", "pid", "reset", "method", "dt", "kp", "ki", "kd"].forEach(id => $(id).disabled = !S.connected);
+  const f = a => "[" + a.map(v => (v >= 0 ? "+" : "") + v.toFixed(3)).join(", ") + "]";
+  $("info").textContent =
+    `links   ${S.lengths.length}  L=${f(S.lengths)}\n` +
+    `t       ${S.t.toFixed(2)} s\n` +
+    `q       ${f(S.q)}\n` +
+    `effort  ${f(S.effort)}\n` +
+    `PID     ${S.pid ? "on" : "off"}\n` +
+    `goal    ${S.status}\n` +
+    `dist    ${S.dist == null ? "–" : S.dist.toFixed(3) + " m"}`;
+}
+
+$("go").onclick = () => {
+  const x = parseFloat($("x").value), y = parseFloat($("y").value);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) { $("msg").textContent = "x and y must be numbers"; return; }
+  sendGoal(x, y);
+};
+$("pid").onclick = () => setPid(!S.pid);
+$("reset").onclick = async () => { await call("/arm_sim/reset", {}); S.target = null; S.status = "idle"; S.dist = null; S.trail = []; S.energy = []; };
+$("clear").onclick = () => { S.trail = []; S.energy = []; };
+$("method").onchange = applyIntegrator;
+$("dt").onchange = applyIntegrator;
+["kp", "ki", "kd"].forEach(k => { $(k).oninput = showGains; $(k).onchange = () => applyGain(k); });
+setInterval(() => { if (S.connected) refreshParams(); }, 2000);   // link lengths can change at runtime
+
+connectEvents();
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>
