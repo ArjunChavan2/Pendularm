@@ -16,7 +16,7 @@ Unreachable with a human-readable reason (the service layer turns that into
 the response's `status`).
 """
 from __future__ import annotations
-from math import sin, cos
+from math import sin, cos, acos, atan2, sqrt, pi
 
 
 class Unreachable(ValueError):
@@ -35,6 +35,42 @@ def forward_kinematics(q: list[float], lengths: list[float]) -> tuple[float, flo
       x += lengths[k] * cos(phi)
       y += lengths[k] * sin(phi)
     return (x, y, phi)
+
+
+def _two_link_ik(x: float, y: float, l1: float, l2: float) -> list[float]:
+    """Joint angles [q1, q2] placing a 2-link arm's tip at (x, y).
+
+    Law of Cosines: cos q2 = (r^2 - l1^2 - l2^2) / (2 l1 l2), with
+    r^2 = x^2 + y^2; then q1 = atan2(y, x) - atan2(l2 sin q2, l1 + l2 cos q2).
+    Either elbow configuration is acceptable.
+
+    Raises Unreachable if (x, y) is farther than l1 + l2 or closer than
+    |l1 - l2| -- beyond a tiny floating-point tolerance; the exact boundary
+    (fully extended / fully folded) counts as reachable, so clamp cos q2
+    into [-1, 1] before acos.
+
+    Example: (1, 1) with l1 = l2 = 1 -> [0, pi/2] (elbow-down) or
+    [pi/2, -pi/2] (elbow-up).
+
+    Also used by inverse_kinematics for a 3-link arm's wrist point.
+    """
+    rsq = x**2 + y**2
+    k = (rsq - l1**2 - l2**2) / (2 * l1 * l2)
+    if k < -(1):
+      if k > -(1 + 1e-9):
+        k = -1
+      else:
+        raise Unreachable("Unreachable destination: too close")
+    if k > (1):
+      if k < (1 + 1e-9):
+        k = 1
+      else:
+        raise Unreachable("Unreachable destination: too far")
+    q2 = acos(k)
+    a = atan2(y, x)
+    b = atan2(l2 * sin(q2), l1 + l2 * cos(q2))
+    q1 = a - b
+    return [q1, q2]
 
 
 def inverse_kinematics(x: float, y: float, lengths: list[float],
@@ -60,4 +96,24 @@ def inverse_kinematics(x: float, y: float, lengths: list[float],
     Check (the grader's own property): forward_kinematics(result, lengths)
     reproduces (x, y) -- and phi, when n == 3 and phi was given.
     """
-    raise NotImplementedError("kinematics.inverse_kinematics: implement by hand (see module docstring)")
+    n = len(lengths)
+    if n == 2:
+      return _two_link_ik(x, y, lengths[0], lengths[1])
+    
+    if phi is not None:
+      wx, wy = x - lengths[2] * cos(phi), y - lengths[2] * sin(phi)
+      q = _two_link_ik(wx, wy, lengths[0], lengths[1])
+      q.append(phi - sum(q))
+      return q
+    else:
+      dest = sqrt(x**2 + y**2)
+      if dest > sum(lengths):
+        raise Unreachable("Destination is too far away")
+
+      phi = atan2(y, x)
+      for i in range(0, 360, 5):
+        try:
+          return inverse_kinematics(x, y, lengths, phi + ((i * pi) / 180))
+        except Unreachable:
+          continue
+      raise Unreachable("Phi couldnt be found")
