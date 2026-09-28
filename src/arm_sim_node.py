@@ -1,11 +1,17 @@
 """arm_sim node: the /arm_sim/integration_step checkpoint service, the
-/arm_sim/set_params, /arm_sim/set_integrator, and /arm_sim/pause
-parameter/mode-storage services, and the live n-link arm's physics loop
-(physics_loop) and /joint_states publisher (publish_loop).
+/arm_sim/set_params, /arm_sim/set_integrator, /arm_sim/pause, and
+/arm_sim/reset services, the /joint_trajectory setpoint subscriber, the
+/pid_controller/enable and /pid_controller/set_gains services, and the live
+n-link arm's physics loop (physics_loop) and /joint_states publisher
+(publish_loop).
 
-/arm_sim/reset is NOT included here: the spec ties it to also resetting the
-PID controller's setpoint/integral, which doesn't exist yet -- deferred to
-when pid.py is built.
+/joint_trajectory stores the held setpoint (state.setpoint_pos /
+state.setpoint_vel), which physics_loop feeds to the owner's
+pid.PIDController.update() once per tick while PID is enabled (disabled by
+default; tau is the zero vector while disabled and the integral does not
+advance). /arm_sim/reset snaps the plant, zeroes sim_time, and calls
+state.reset_pid_controller(), which resets the stored setpoint to the reset
+pose and clears the controller's integral (gains are kept).
 
 Assumptions documented here since the spec doesn't give literal defaults for
 these (only gravity=9.81 is spec-stated):
@@ -18,13 +24,19 @@ these (only gravity=9.81 is spec-stated):
   than "independently" the way set_params does explicitly
 - reset pose is q = qdot = [0.0]*links (see agent-notes/PLAN.md, "Open
   questions and assumptions")
+- default PID gains kp=200, ki=60, kd=10 per joint and integral_limit=10.0
+  (spec: "no single correct set of gains"). Checked offline to converge
+  (< 0.05 rad within ~7.5 s) on 2- and 3-link unit-mass/unit-length arms
+  under all four integrators at the default timestep 0.01. A larger kd
+  (e.g. 40) makes the light distal-link mode too stiff for explicit
+  integration at dt=0.01 and diverges.
 
 physics_loop/publish_loop wiring (agent-notes/PLAN.md, "Proposed
 architecture"): physics_loop paces itself by the *current*
 state.integrator_timestep each iteration and, while not paused, steps
 (state.q, state.qdot) forward one tick via integrators.METHODS[...], with
-tau always the zero vector (PID is not wired in yet -- always disabled this
-pass). publish_loop is entirely independent of physics_loop: it publishes
+tau computed once per tick by the PID controller while enabled (zero while
+disabled) and held constant across the integrator's substages. publish_loop is entirely independent of physics_loop: it publishes
 /joint_states at a fixed reference 60 Hz regardless of `paused` or the
 current integrator_timestep. Both loops read every relevant _ArmSimState
 field fresh on each iteration (never cached), so a mid-run
@@ -34,15 +46,22 @@ next tick.
 from __future__ import annotations
 
 import asyncio
+import math
 from typing import Any
 
 import arm_dynamics
 import expr
 import integrators
+import pid
 from gateway import log
 from registry import Registry
 
 PUBLISH_PERIOD_S = 1 / 60
+
+DEFAULT_KP = 200.0
+DEFAULT_KI = 60.0
+DEFAULT_KD = 10.0
+INTEGRAL_LIMIT = 10.0
 
 
 def _is_number(value: Any) -> bool:
@@ -101,7 +120,9 @@ def _integration_step(args: Any) -> tuple[bool, dict, str]:
 
 class _ArmSimState:
     """Holds the parameter/mode state for /arm_sim/set_params,
-    /arm_sim/set_integrator, and /arm_sim/pause. One instance per runtime.
+    /arm_sim/set_integrator, /arm_sim/pause, and /arm_sim/reset, plus the
+    live arm state and the /joint_trajectory setpoint. One instance per
+    runtime.
     """
 
     def __init__(self, links: int) -> None:
@@ -118,6 +139,18 @@ class _ArmSimState:
         self.q = [0.0] * links
         self.qdot = [0.0] * links
         self.sim_time = 0.0
+        # Held PID setpoint, set by /joint_trajectory (last point only) and
+        # by /arm_sim/reset. Starts at the reset pose so an enabled
+        # controller with no trajectory yet received just holds home.
+        self.setpoint_pos = [0.0] * links
+        self.setpoint_vel = [0.0] * links
+        # PID: starts disabled (spec). `tau` is the effort physics_loop last
+        # applied (zero while disabled), which /joint_states reports.
+        self.pid_enabled = False
+        self.controller = pid.PIDController(
+            links, [DEFAULT_KP] * links, [DEFAULT_KI] * links, [DEFAULT_KD] * links,
+            INTEGRAL_LIMIT)
+        self.tau = [0.0] * links
 
     def set_params(self, args: Any) -> tuple[bool, dict, str]:
         args = args or {}
@@ -179,6 +212,124 @@ class _ArmSimState:
             self.paused = data
         return True, {"data": self.paused}, ""
 
+    def reset_pid_controller(self) -> None:
+        """Reset the controller "to match" a freshly-reset plant (spec,
+        /arm_sim/reset): the held setpoint goes to the reset pose so the arm
+        isn't pulled back toward an old target, and the accumulated integral
+        is cleared (gains and the enabled flag are kept).
+        """
+        self.setpoint_pos = [0.0] * self.links
+        self.setpoint_vel = [0.0] * self.links
+        self.controller.reset()
+        self.tau = [0.0] * self.links
+
+    def pid_enable(self, args: Any) -> tuple[bool, dict, str]:
+        """/pid_controller/enable: `{"data": <bool>}`; `{}` queries. Enabling
+        from disabled clears the integral (whatever accumulated "while
+        nothing was listening"); enabling while already enabled is a no-op.
+        Echoes the current enabled flag, like /arm_sim/pause.
+        """
+        args = args or {}
+        if not isinstance(args, dict):
+            return False, {"data": self.pid_enabled}, "request must be an object"
+        if "data" in args:
+            data = args["data"]
+            if not isinstance(data, bool):
+                return False, {"data": self.pid_enabled}, "'data' must be a boolean"
+            if data and not self.pid_enabled:
+                self.controller.reset()
+            self.pid_enabled = data
+            if not data:
+                self.tau = [0.0] * self.links
+        return True, {"data": self.pid_enabled}, ""
+
+    def _gains_values(self) -> dict:
+        c = self.controller
+        return {"kp": [float(v) for v in c.kp], "ki": [float(v) for v in c.ki],
+                "kd": [float(v) for v in c.kd]}
+
+    def set_gains(self, args: Any) -> tuple[bool, dict, str]:
+        """/pid_controller/set_gains: optional `kp`/`ki`/`kd` arrays, each
+        validated (exactly `links` finite numbers, each >= 0) and applied
+        independently; `{}` queries. Always echoes the current gains. Never
+        touches the integral (spec).
+        """
+        args = args or {}
+        if not isinstance(args, dict):
+            return False, self._gains_values(), "request must be an object"
+        errors: list[str] = []
+        for name in ("kp", "ki", "kd"):
+            if name not in args:
+                continue
+            value = args[name]
+            if (isinstance(value, list) and len(value) == self.links
+                    and all(_is_number(v) and math.isfinite(v) and v >= 0 for v in value)):
+                setattr(self.controller, name, [float(v) for v in value])
+            else:
+                errors.append(f"'{name}' must be a list of {self.links} non-negative numbers")
+        return (not errors), self._gains_values(), "; ".join(errors)
+
+    def reset(self, args: Any) -> tuple[bool, dict, str]:
+        """/arm_sim/reset: `{}` request. Snaps (q, qdot) to the reset pose,
+        zeroes sim_time, resets the PID controller, and echoes the resulting
+        pose. `paused` is left as-is (the spec doesn't tie reset to it).
+
+        No awaits here, so on the single asyncio loop this can never
+        interleave with a half-finished physics_loop tick.
+        """
+        if args is not None and not isinstance(args, dict):
+            return (False, {"position": list(self.q), "velocity": list(self.qdot)},
+                    "request must be an object ({})")
+        self.q = [0.0] * self.links
+        self.qdot = [0.0] * self.links
+        self.sim_time = 0.0
+        self.reset_pid_controller()
+        return True, {"position": list(self.q), "velocity": list(self.qdot)}, ""
+
+    def _setpoint_array(self, value: Any) -> list[float]:
+        """A positions/velocities array from a trajectory point: used as-is
+        if it's exactly `links` finite numbers, otherwise all-zero (spec:
+        "defaulting to all-zero if omitted or the wrong length"; non-numeric
+        or non-finite entries are treated the same way).
+        """
+        if (isinstance(value, list) and len(value) == self.links
+                and all(_is_number(v) and math.isfinite(v) for v in value)):
+            return [float(v) for v in value]
+        return [0.0] * self.links
+
+    def set_trajectory(self, msg: Any) -> bool:
+        """Apply a /joint_trajectory message: only the *last* entry of
+        `points` becomes the held setpoint, the instant it arrives (step
+        servo, not a trajectory follower). A message with no usable last
+        point (not an object, `points` missing/empty/not a list, last entry
+        not an object) is ignored and the previous setpoint is kept --
+        topics have no response channel to report a rejection on.
+        `joint_names` is not used for reordering; arrays are taken in joint
+        order. Returns whether the message was applied (for tests).
+        """
+        if not isinstance(msg, dict):
+            return False
+        points = msg.get("points")
+        if not isinstance(points, list) or not points or not isinstance(points[-1], dict):
+            return False
+        last = points[-1]
+        self.setpoint_pos = self._setpoint_array(last.get("positions"))
+        self.setpoint_vel = self._setpoint_array(last.get("velocities"))
+        return True
+
+
+class _TrajectorySubscriber:
+    """In-process Connection stand-in subscribed to /joint_trajectory:
+    Registry.publish() hands it the full `{"op": "publish", ...}` envelope,
+    and it forwards the inner `msg` to state.set_trajectory().
+    """
+
+    def __init__(self, state: _ArmSimState) -> None:
+        self._state = state
+
+    def send(self, message: dict) -> None:
+        self._state.set_trajectory(message.get("msg"))
+
 
 def _joint_names(links: int) -> list[str]:
     """1-indexed joint names ("joint1", "joint2", ...), matching the spec's
@@ -196,10 +347,15 @@ async def physics_loop(state: _ArmSimState) -> None:
     skipped -- the loop keeps sleeping/looping so it resumes promptly once
     unpaused, rather than exiting or blocking.
 
-    tau is always the zero vector this pass (PID is not wired in yet).
-    arm_dynamics.forward_dynamics is expected to raise NotImplementedError
-    until its owner fills it in by hand -- any exception from a tick (that,
-    or a future bug in a completed implementation) is caught, logged once
+    tau: while state.pid_enabled, computed once per tick by
+    state.controller.update() from the measured (q, qdot) at the start of the
+    tick and this tick's dt, then held constant across the integrator's
+    substages (a zero-order-hold control input); while disabled, the zero
+    vector, and update() is not called so the integral does not advance.
+    state.tau records the effort actually applied, for /joint_states.
+
+    Any exception from a tick (e.g. a bug in forward_dynamics or the
+    controller) is caught, logged once
     (then throttled to avoid flooding stderr on every subsequent tick), and
     the loop keeps running so the rest of the runtime (services,
     publish_loop) stays fully responsive regardless.
@@ -217,12 +373,18 @@ async def physics_loop(state: _ArmSimState) -> None:
             links = state.links
             method = integrators.METHODS[state.integrator_method]
 
-            def _accel_fn(t: float, q: list[float], qdot: list[float]) -> list[float]:
+            if state.pid_enabled:
+                tau = [float(v) for v in state.controller.update(
+                    state.setpoint_pos, state.setpoint_vel, state.q, state.qdot, dt)]
+            else:
                 tau = [0.0] * links
+
+            def _accel_fn(t: float, q: list[float], qdot: list[float]) -> list[float]:
                 return arm_dynamics.forward_dynamics(q, qdot, tau, gravity, masses, lengths)
 
             q_next, qdot_next = method(_accel_fn, state.sim_time, state.q, state.qdot, dt)
             state.q, state.qdot = q_next, qdot_next
+            state.tau = tau
             state.sim_time += dt
         except Exception as exc:
             if not logged_failure:
@@ -248,7 +410,7 @@ async def publish_loop(registry: Registry, state: _ArmSimState) -> None:
             "name": names,
             "position": list(state.q),
             "velocity": list(state.qdot),
-            "effort": [0.0] * state.links,
+            "effort": list(state.tau),
         }
         registry.publish("/joint_states", msg)
 
@@ -260,4 +422,8 @@ def register(registry: Registry, links: int = 2) -> _ArmSimState:
     registry.register_handler("/arm_sim/set_params", state.set_params)
     registry.register_handler("/arm_sim/set_integrator", state.set_integrator)
     registry.register_handler("/arm_sim/pause", state.pause)
+    registry.register_handler("/arm_sim/reset", state.reset)
+    registry.register_handler("/pid_controller/enable", state.pid_enable)
+    registry.register_handler("/pid_controller/set_gains", state.set_gains)
+    registry.subscribe(_TrajectorySubscriber(state), "/joint_trajectory")
     return state

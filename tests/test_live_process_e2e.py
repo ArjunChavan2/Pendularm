@@ -277,6 +277,72 @@ class TestLiveMakeRunProcess(unittest.TestCase):
         finally:
             c.close()
 
+    def test_reset_and_joint_trajectory_on_real_runtime(self):
+        # Pause first so the post-reset pose/clock seen on /joint_states is
+        # deterministic (physics can't advance it again before we read it).
+        c = _RawClient()
+        try:
+            self.assertTrue(c.call_service("/arm_sim/pause", {"data": True})["result"])
+
+            # /joint_trajectory: advertise + publish must not disturb the
+            # runtime; a following service call still answers normally.
+            self.send_trajectory(c, [[0.3, -0.5, 0.1], [0.2, 0.1, 0.0]])
+
+            resp = c.call_service("/arm_sim/reset", {})
+            self.assertTrue(resp["result"], resp)
+            self.assertEqual(resp["values"], {"position": [0.0, 0.0, 0.0], "velocity": [0.0, 0.0, 0.0]})
+
+            c.subscribe("/joint_states")
+            body = c.recv_publish("/joint_states", timeout=3.0)["msg"]
+            self.assertEqual(body["position"], [0.0, 0.0, 0.0])
+            self.assertEqual(body["velocity"], [0.0, 0.0, 0.0])
+            self.assertEqual(body["header"]["stamp"], {"sec": 0, "nanosec": 0})
+
+            resp = c.call_service("/arm_sim/reset", "not-an-object")
+            self.assertFalse(resp["result"])
+            self.assertTrue(resp["status"])
+        finally:
+            try:
+                c.call_service("/arm_sim/pause", {"data": False})
+            finally:
+                c.close()
+
+    def test_ik_services_reject_cleanly_on_real_runtime(self):
+        # Transport-shape and rejection checks only: no goal or trial is
+        # started, so nothing here moves the shared runtime's arm. Works
+        # whether or not the owner's kinematics.py is implemented yet.
+        c = _RawClient()
+        try:
+            for args in ({}, {"x": 1.0}, {"x": "a", "y": 0.0}, {"x": 100.0, "y": 0.0}):
+                resp = c.call_service("/ik/solve", args, timeout=3.0)
+                self.assertFalse(resp["result"], args)
+                self.assertTrue(resp["status"], args)
+                resp = c.call_service("/ik_action/send_goal", args, timeout=3.0)
+                self.assertFalse(resp["result"], args)
+                self.assertTrue(resp["status"], args)
+            for service in ("/ik_action/cancel_goal", "/ik_trial/skip", "/ik_trial/stop"):
+                resp = c.call_service(service, {}, timeout=3.0)
+                self.assertFalse(resp["result"], service)
+                self.assertTrue(resp["status"], service)
+
+            resp = c.call_service("/ik/solve", {"x": 1.5, "y": 1.0, "phi": 0.3}, timeout=3.0)
+            if not resp["result"] and "not implemented" in resp["status"]:
+                self.skipTest("kinematics.py is still a stub; round-trip not checkable yet")
+            self.assertTrue(resp["result"], resp)
+            self.assertEqual(len(resp["values"]["positions"]), 3)
+        finally:
+            c.close()
+
+    @staticmethod
+    def send_trajectory(c: "_RawClient", points: list[list[float]]) -> None:
+        c.send({"op": "advertise", "topic": "/joint_trajectory", "type": "trajectory_msgs/JointTrajectory"})
+        c.send({"op": "publish", "topic": "/joint_trajectory", "msg": {
+            "header": {"stamp": {"sec": 0, "nanosec": 0}, "frame_id": ""},
+            "joint_names": ["joint1", "joint2", "joint3"],
+            "points": [{"positions": p, "velocities": [0.0, 0.0, 0.0], "accelerations": [],
+                        "time_from_start": {"sec": 0, "nanosec": 0}} for p in points],
+        }})
+
     def test_zz_clean_sigterm_shutdown_of_underlying_python_process(self):
         # Named "zz_" so unittest's alphabetical method ordering runs this
         # LAST within the class -- it kills the shared server subprocess, so

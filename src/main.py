@@ -1,11 +1,13 @@
 """Project 2 runtime entry point (`make run`).
 
 Wires the Registry, TCP gateway, the /arm_sim/integration_step checkpoint
-service and /arm_sim/* state services, and the live n-link arm's two
-background tasks (arm_sim_node.physics_loop, arm_sim_node.publish_loop),
-running concurrently with the gateway's own per-connection coroutines on the
-same asyncio event loop. PID and IK nodes will be added here once pid.py and
-kinematics.py exist.
+service, the /arm_sim/* and /pid_controller/* services (all registered by
+arm_sim_node.register), the /ik/*, /ik_action/*, and /ik_trial/* services
+(ik_node.register, after arm_sim_node since /ik/solve queries
+/arm_sim/set_params), and the runtime's background tasks
+(arm_sim_node.physics_loop, arm_sim_node.publish_loop,
+ik_node.trial_status_loop), running concurrently with the gateway's own
+per-connection coroutines on the same asyncio event loop.
 """
 from __future__ import annotations
 
@@ -14,6 +16,7 @@ import os
 import signal
 
 import arm_sim_node
+import ik_node
 from gateway import Gateway, log
 from registry import Registry
 
@@ -28,12 +31,14 @@ async def run() -> None:
 
     registry = Registry()
     state = arm_sim_node.register(registry, links)
+    _, trial = ik_node.register(registry)
 
     gateway = Gateway(registry)
     await gateway.start()
 
     physics_task = asyncio.create_task(arm_sim_node.physics_loop(state))
     publish_task = asyncio.create_task(arm_sim_node.publish_loop(registry, state))
+    trial_task = asyncio.create_task(ik_node.trial_status_loop(trial))
 
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
@@ -48,9 +53,10 @@ async def run() -> None:
     await stop_event.wait()
     await gateway.stop()
 
-    for task in (physics_task, publish_task):
+    tasks = (physics_task, publish_task, trial_task)
+    for task in tasks:
         task.cancel()
-    await asyncio.gather(physics_task, publish_task, return_exceptions=True)
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def main() -> None:
