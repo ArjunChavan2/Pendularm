@@ -239,34 +239,32 @@ class TestLiveMakeRunProcess(unittest.TestCase):
         finally:
             c.close()
 
-    def test_joint_states_publishes_and_runtime_stays_responsive_with_unimplemented_arm_dynamics(self):
-        # src/arm_dynamics.py ships as an intentional stub (raises
-        # NotImplementedError every physics tick) until its owner
-        # hand-implements it -- confirms physics_loop's per-tick try/except
-        # (see arm_sim_node.py) keeps the real subprocess's gateway, other
-        # services, and /joint_states publication fully working despite
-        # that, rather than the live-arm addition silently regressing the
-        # already-passing checkpoint behavior or crashing the process.
+    def test_joint_states_publishes_and_arm_swings_under_gravity(self):
+        # With arm_dynamics implemented and PID disabled (tau = 0), the spec
+        # says the arm should visibly move from the reset pose under gravity
+        # -- confirms the real subprocess publishes /joint_states with finite,
+        # changing positions, while the gateway and other services stay
+        # fully responsive.
         c = _RawClient()
         try:
             c.subscribe("/joint_states")
             # ack for the subscribe request itself, then several published
             # /joint_states messages.
-            first = c.recv_publish("/joint_states", timeout=3.0)
-            second = c.recv_publish("/joint_states", timeout=3.0)
+            msgs = [c.recv_publish("/joint_states", timeout=3.0) for _ in range(5)]
 
-            for msg in (first, second):
+            for msg in msgs:
                 body = msg["msg"]
                 self.assertEqual(body["name"], ["joint1", "joint2", "joint3"])
                 self.assertEqual(len(body["position"]), 3)
                 self.assertEqual(len(body["velocity"]), 3)
                 self.assertEqual(len(body["effort"]), 3)
-                # arm_dynamics.forward_dynamics raises every tick, so the
-                # physics loop never successfully advances -- position and
-                # velocity stay frozen at the reset pose, not NaN/garbage
-                # and not silently missing.
-                self.assertEqual(body["position"], [0.0, 0.0, 0.0])
-                self.assertEqual(body["velocity"], [0.0, 0.0, 0.0])
+                for v in body["position"] + body["velocity"]:
+                    self.assertTrue(math.isfinite(v), body)
+
+            self.assertNotEqual(
+                msgs[0]["msg"]["position"], msgs[-1]["msg"]["position"],
+                "arm should move under gravity with zero effort",
+            )
 
             # The rest of the runtime must stay fully responsive throughout.
             resp = c.call_service("/arm_sim/integration_step", {

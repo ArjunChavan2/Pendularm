@@ -238,18 +238,18 @@ class TestPhysicsLoopWiring(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(state.qdot[0], 0.2)
 
     async def test_forward_dynamics_exception_is_caught_and_loop_keeps_running(self):
-        # The real, currently-unimplemented arm_dynamics.forward_dynamics
-        # always raises NotImplementedError -- physics_loop must catch this
-        # (and any other exception) and keep looping rather than letting the
-        # task die silently, per the plan's "Edge cases" section.
+        # If arm_dynamics.forward_dynamics raises on a tick, physics_loop must
+        # catch it (and any other exception) and keep looping rather than
+        # letting the task die silently, per the plan's "Edge cases" section.
         state = _ArmSimState(links=2)
         state.integrator_method = "euler"
         state.integrator_timestep = 0.1
 
-        # Use the REAL, unmodified arm_dynamics.forward_dynamics stub here
-        # (no monkeypatch) -- this is the actual failure mode in the shipped
-        # repo today.
-        calls = await self._run_loop_ticks(state, n_ticks=5)
+        def raising_stub(q, qdot, tau, gravity, masses, lengths):
+            raise RuntimeError("simulated forward_dynamics failure")
+
+        with mock.patch("arm_dynamics.forward_dynamics", side_effect=raising_stub):
+            calls = await self._run_loop_ticks(state, n_ticks=5)
 
         self.assertEqual(len(calls), 5, "loop must keep sleeping/ticking despite the exception")
         # A tick that raises must not partially apply -- state stays frozen
