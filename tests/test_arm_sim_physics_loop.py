@@ -282,13 +282,14 @@ class TestPhysicsLoopWiring(unittest.IsolatedAsyncioTestCase):
         with mock.patch("arm_dynamics.forward_dynamics", side_effect=recording_stub):
             dt_calls = await self._run_loop_ticks(state, n_ticks=3, on_tick=apply_mid_run_changes)
 
-        # tick 1: default gravity (9.81), default pacing timestep (0.01).
+        # tick 1: default gravity (9.81), default pacing timestep (DEFAULT_TIMESTEP).
         # tick 2: set_params({"gravity": 3.0}) fires before this tick's body
         #   reads gravity, and set_integrator({"timestep": 2.0}) fires before
         #   the *next* sleep call re-reads the pacing interval.
         # tick 3: both changes still in effect (no restart needed).
         self.assertEqual(seen_gravities, [9.81, 3.0, 3.0])
-        self.assertEqual(dt_calls, [0.01, 0.01, 2.0])
+        d = arm_sim_node.DEFAULT_TIMESTEP
+        self.assertEqual(dt_calls, [d, d, 2.0])
 
 
 class TestPublishLoopWiring(unittest.IsolatedAsyncioTestCase):

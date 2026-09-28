@@ -107,7 +107,7 @@ def inverse_kinematics(x: float, y: float, lengths: list[float],
       return q
     else:
       dest = sqrt(x**2 + y**2)
-      if dest > sum(lengths):
+      if dest > sum(lengths) * (1 + 1e-9):
         raise Unreachable("Destination is too far away")
 
       phi = atan2(y, x)

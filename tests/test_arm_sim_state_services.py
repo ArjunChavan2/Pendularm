@@ -104,7 +104,7 @@ class TestSetIntegrator(unittest.TestCase):
         with Client() as c:
             resp = c.call_service("/arm_sim/set_integrator", {})
         self.assertTrue(resp["result"])
-        self.assertEqual(resp["values"], {"method": "euler", "timestep": 0.01})
+        self.assertEqual(resp["values"], {"method": "euler", "timestep": arm_sim_node.DEFAULT_TIMESTEP})
 
     def test_valid_update_applies_and_is_echoed(self):
         with Client() as c:

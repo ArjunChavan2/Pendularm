@@ -94,7 +94,7 @@ _FUNCTIONS: dict[str, Callable[[float], float]] = {
 _TOKEN_PATTERN = re.compile(
     r"""
       (?P<WS>\s+)
-    | (?P<NUMBER>\d+\.\d+|\.\d+|\d+\.|\d+)
+    | (?P<NUMBER>(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?)
     | (?P<IDENT>[A-Za-z_][A-Za-z_0-9]*)
     | (?P<OP>[+\-*/^()])
     """,

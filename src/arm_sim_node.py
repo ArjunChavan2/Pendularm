@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import time
 from typing import Any
 
 import arm_dynamics
@@ -58,10 +59,22 @@ from registry import Registry
 
 PUBLISH_PERIOD_S = 1 / 60
 
-DEFAULT_KP = 200.0
-DEFAULT_KI = 60.0
-DEFAULT_KD = 10.0
+# Default physics timestep and per-joint PID gains (joint 1 first; a 2-link
+# arm uses the first two entries). Tuned together: at dt = 0.002 these settle
+# within 0.05 rad in <= ~4 s of sim time on 2- and 3-link arms, all four
+# integrators, unit through heavy (masses [3,2,1], lengths [2,1.5,1]) arms.
+# The small default dt also keeps caller-supplied gains stable far more often.
+DEFAULT_TIMESTEP = 0.002
+DEFAULT_KP = [600.0, 400.0, 200.0]
+DEFAULT_KI = [400.0, 200.0, 100.0]
+DEFAULT_KD = [100.0, 20.0, 6.0]
 INTEGRAL_LIMIT = 10.0
+MAX_CATCHUP_STEPS = 50  # per physics wakeup; beyond this, drop the backlog
+
+
+def _defaults(per_joint: list[float], links: int) -> list[float]:
+    """First `links` entries of a per-joint default (repeating the last if needed)."""
+    return [per_joint[min(i, len(per_joint) - 1)] for i in range(links)]
 
 
 def _is_number(value: Any) -> bool:
@@ -131,7 +144,7 @@ class _ArmSimState:
         self.masses = [1.0] * links
         self.lengths = [1.0] * links
         self.integrator_method = "euler"
-        self.integrator_timestep = 0.01
+        self.integrator_timestep = DEFAULT_TIMESTEP
         self.paused = False
         # Live arm state: reset pose is q = qdot = [0]*links (see module
         # docstring); sim_time is the simulation clock physics_loop advances
@@ -148,9 +161,10 @@ class _ArmSimState:
         # applied (zero while disabled), which /joint_states reports.
         self.pid_enabled = False
         self.controller = pid.PIDController(
-            links, [DEFAULT_KP] * links, [DEFAULT_KI] * links, [DEFAULT_KD] * links,
+            links, _defaults(DEFAULT_KP, links), _defaults(DEFAULT_KI, links), _defaults(DEFAULT_KD, links),
             INTEGRAL_LIMIT)
         self.tau = [0.0] * links
+        self._logged_step_failure = False
 
     def set_params(self, args: Any) -> tuple[bool, dict, str]:
         args = args or {}
@@ -183,25 +197,33 @@ class _ArmSimState:
         return (not errors), values, "; ".join(errors)
 
     def set_integrator(self, args: Any) -> tuple[bool, dict, str]:
+        """Validate every field first, then apply all of them or none (spec:
+        "a caller reading the response can trust that a change either took
+        effect or didn't")."""
         args = args or {}
+        if not isinstance(args, dict):
+            return False, self._integrator_values(), "request must be an object"
         errors: list[str] = []
+        method, timestep = self.integrator_method, self.integrator_timestep
 
         if "method" in args:
-            method = args["method"]
-            if isinstance(method, str) and method in integrators.METHODS:
-                self.integrator_method = method
+            if isinstance(args["method"], str) and args["method"] in integrators.METHODS:
+                method = args["method"]
             else:
-                errors.append(f"unknown integrator method {method!r}")
+                errors.append(f"unknown integrator method {args['method']!r}")
 
         if "timestep" in args:
-            timestep = args["timestep"]
-            if _is_number(timestep) and timestep > 0:
-                self.integrator_timestep = float(timestep)
+            if _is_number(args["timestep"]) and math.isfinite(args["timestep"]) and args["timestep"] > 0:
+                timestep = float(args["timestep"])
             else:
                 errors.append("'timestep' must be a positive number")
 
-        values = {"method": self.integrator_method, "timestep": self.integrator_timestep}
-        return (not errors), values, "; ".join(errors)
+        if not errors:
+            self.integrator_method, self.integrator_timestep = method, timestep
+        return (not errors), self._integrator_values(), "; ".join(errors)
+
+    def _integrator_values(self) -> dict:
+        return {"method": self.integrator_method, "timestep": self.integrator_timestep}
 
     def pause(self, args: Any) -> tuple[bool, dict, str]:
         args = args or {}
@@ -360,37 +382,59 @@ async def physics_loop(state: _ArmSimState) -> None:
     the loop keeps running so the rest of the runtime (services,
     publish_loop) stays fully responsive regardless.
     """
-    logged_failure = False
+    # Real-time pacing: asyncio.sleep(dt) always overshoots a little (timer
+    # granularity, compute, other tasks), so one step per wakeup lets sim time
+    # fall steadily behind wall time (~85-90% measured, worse at small dt or on
+    # a loaded machine). Instead, accumulate the wall time that actually
+    # elapsed and take as many dt steps as it owes -- at least one per wakeup,
+    # at most MAX_CATCHUP_STEPS so a stalled machine can't spiral.
+    owed = 0.0
+    last = time.monotonic()
     while True:
-        dt = state.integrator_timestep
-        await asyncio.sleep(dt)
+        await asyncio.sleep(state.integrator_timestep)
+        now = time.monotonic()
+        owed += now - last
+        last = now
 
         if state.paused:
+            owed = 0.0
             continue
 
-        try:
-            gravity, masses, lengths = state.gravity, state.masses, state.lengths
-            links = state.links
-            method = integrators.METHODS[state.integrator_method]
+        dt = state.integrator_timestep
+        steps = min(max(1, int(owed / dt)), MAX_CATCHUP_STEPS)
+        owed = 0.0 if steps == MAX_CATCHUP_STEPS else max(0.0, owed - steps * dt)
+        for _ in range(steps):
+            _physics_step(state, dt)
 
-            if state.pid_enabled:
-                tau = [float(v) for v in state.controller.update(
-                    state.setpoint_pos, state.setpoint_vel, state.q, state.qdot, dt)]
-            else:
-                tau = [0.0] * links
 
-            def _accel_fn(t: float, q: list[float], qdot: list[float]) -> list[float]:
-                return arm_dynamics.forward_dynamics(q, qdot, tau, gravity, masses, lengths)
+def _physics_step(state: _ArmSimState, dt: float) -> bool:
+    """Advance the live arm by one integrator step of `dt`. Returns False
+    (after logging the first failure) if the step raised."""
+    try:
+        gravity, masses, lengths = state.gravity, state.masses, state.lengths
+        links = state.links
+        method = integrators.METHODS[state.integrator_method]
 
-            q_next, qdot_next = method(_accel_fn, state.sim_time, state.q, state.qdot, dt)
-            state.q, state.qdot = q_next, qdot_next
-            state.tau = tau
-            state.sim_time += dt
-        except Exception as exc:
-            if not logged_failure:
-                log(f"physics_loop: tick failed, arm frozen until this is resolved ({exc!r}); "
-                    "further failures on this tick will not be individually logged")
-                logged_failure = True
+        if state.pid_enabled:
+            tau = [float(v) for v in state.controller.update(
+                state.setpoint_pos, state.setpoint_vel, state.q, state.qdot, dt)]
+        else:
+            tau = [0.0] * links
+
+        def _accel_fn(t: float, q: list[float], qdot: list[float]) -> list[float]:
+            return arm_dynamics.forward_dynamics(q, qdot, tau, gravity, masses, lengths)
+
+        q_next, qdot_next = method(_accel_fn, state.sim_time, state.q, state.qdot, dt)
+        state.q, state.qdot = q_next, qdot_next
+        state.tau = tau
+        state.sim_time += dt
+        return True
+    except Exception as exc:
+        if not state._logged_step_failure:
+            log(f"physics_loop: tick failed, arm frozen until this is resolved ({exc!r}); "
+                "further failures will not be individually logged")
+            state._logged_step_failure = True
+        return False
 
 
 async def publish_loop(registry: Registry, state: _ArmSimState) -> None:
@@ -403,8 +447,7 @@ async def publish_loop(registry: Registry, state: _ArmSimState) -> None:
     while True:
         await asyncio.sleep(PUBLISH_PERIOD_S)
 
-        stamp_sec = int(state.sim_time)
-        stamp_nanosec = int(round((state.sim_time - stamp_sec) * 1e9))
+        stamp_sec, stamp_nanosec = divmod(int(round(state.sim_time * 1e9)), 1_000_000_000)
         msg = {
             "header": {"stamp": {"sec": stamp_sec, "nanosec": stamp_nanosec}, "frame_id": ""},
             "name": names,

@@ -25,6 +25,7 @@ HOST = "127.0.0.1"
 PORT = 9095
 
 SERVICE_CALL_TIMEOUT_S = 5.0
+MAX_LINE_BYTES = 4 * 1024 * 1024  # protocol: "Implementations may reject a line larger than 4 MiB"
 
 
 def log(*args: Any) -> None:
@@ -38,6 +39,16 @@ class Connection:
     def __init__(self, writer: asyncio.StreamWriter) -> None:
         self._writer = writer
         self.advertised_services: set[str] = set()
+        # Topics this connection explicitly unadvertised: publishing there is
+        # dropped until it advertises again. A connection that never
+        # advertised may still publish (the protocol doesn't require it).
+        self.revoked_topics: set[str] = set()
+
+    def close(self) -> None:
+        try:
+            self._writer.close()
+        except Exception:
+            pass
 
     def send(self, message: dict) -> None:
         try:
@@ -61,23 +72,37 @@ class Gateway:
         self.registry = registry
         self._pending: dict[str, _PendingCall] = {}
         self._server: asyncio.base_events.Server | None = None
+        self._connections: set[Connection] = set()
 
     async def start(self) -> None:
-        self._server = await asyncio.start_server(self._handle_client, HOST, PORT)
+        self._server = await asyncio.start_server(self._handle_client, HOST, PORT, limit=MAX_LINE_BYTES)
         log(f"gateway listening on {HOST}:{PORT}")
 
     async def stop(self) -> None:
         if self._server is not None:
             self._server.close()
-            await self._server.wait_closed()
+            # Since Python 3.12.1, wait_closed() also waits for every open
+            # client connection -- close them first so shutdown (e.g. SIGTERM
+            # with a grader still connected) can't hang.
+            for conn in list(self._connections):
+                conn.close()
+            try:
+                await asyncio.wait_for(self._server.wait_closed(), timeout=1.0)
+            except asyncio.TimeoutError:
+                pass
 
     # -- per-connection loop -------------------------------------------------
 
     async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         conn = Connection(writer)
+        self._connections.add(conn)
         try:
             while True:
-                line = await reader.readline()
+                try:
+                    line = await reader.readline()
+                except ValueError:  # line over MAX_LINE_BYTES: reject it, keep the connection
+                    conn.send({"op": "status", "level": "error", "msg": "line too long"})
+                    continue
                 if not line:
                     break
                 line = line.strip()
@@ -95,6 +120,7 @@ class Gateway:
         except (ConnectionError, asyncio.IncompleteReadError):
             pass
         finally:
+            self._connections.discard(conn)
             self._cleanup_connection(conn)
             try:
                 writer.close()
@@ -117,8 +143,10 @@ class Gateway:
         try:
             if op == "advertise":
                 self.registry.advertise(conn, message["topic"])
+                conn.revoked_topics.discard(message["topic"])
             elif op == "unadvertise":
                 self.registry.unadvertise(conn, message["topic"])
+                conn.revoked_topics.add(message["topic"])
             elif op == "subscribe":
                 self.registry.subscribe(conn, message["topic"])
                 conn.send({"op": "status", "level": "info", "msg": f"subscribed to {message['topic']}", "id": req_id})
@@ -126,12 +154,12 @@ class Gateway:
                 self.registry.unsubscribe(conn, message["topic"])
             elif op == "publish":
                 topic = message["topic"]
-                # A connection may publish on a topic only while it currently
-                # holds an advertisement there; unadvertise immediately
-                # revokes it. Silently dropped, matching this project's other
-                # silent-reject cases (e.g. a malformed /map) -- publish has
-                # no acknowledgement in this protocol either way.
-                if self.registry.is_advertised(conn, topic):
+                # The protocol doesn't require advertise before publish, so a
+                # connection that never advertised may publish. An explicit
+                # unadvertise revokes publishing on that topic (silently
+                # dropped -- publish has no acknowledgement) until it
+                # advertises again.
+                if topic not in conn.revoked_topics:
                     self.registry.publish(topic, message.get("msg"))
             elif op == "advertise_service":
                 service = message["service"]

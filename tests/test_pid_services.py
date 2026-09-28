@@ -116,9 +116,9 @@ class TestSetGainsUnit(unittest.TestCase):
             result, values, status = state.set_gains({})
             self.assertTrue(result)
             self.assertEqual(status, "")
-            self.assertEqual(values, {"kp": [arm_sim_node.DEFAULT_KP] * links,
-                                      "ki": [arm_sim_node.DEFAULT_KI] * links,
-                                      "kd": [arm_sim_node.DEFAULT_KD] * links})
+            self.assertEqual(values, {"kp": arm_sim_node.DEFAULT_KP[:links],
+                                      "ki": arm_sim_node.DEFAULT_KI[:links],
+                                      "kd": arm_sim_node.DEFAULT_KD[:links]})
             self.assertEqual(state.set_gains(None)[1], values)
 
     def test_valid_update_applies_and_echoes(self):
@@ -163,7 +163,7 @@ class TestSetGainsUnit(unittest.TestCase):
         state = _ArmSimState(2)
         _, values, _ = state.set_gains({})
         values["kp"][0] = -99.0
-        self.assertEqual(state.set_gains({})[1]["kp"][0], arm_sim_node.DEFAULT_KP)
+        self.assertEqual(state.set_gains({})[1]["kp"][0], arm_sim_node.DEFAULT_KP[0])
 
 
 class TestResetClearsController(unittest.TestCase):
@@ -367,8 +367,8 @@ class TestPidServicesOverWire(unittest.TestCase):
             self.assertFalse(resp["result"])
             self.assertIn("kd", resp["status"])
             self.assertEqual(resp["values"]["kp"], [5.0, 5.0, 5.0])
-            self.assertEqual(resp["values"]["kd"], [arm_sim_node.DEFAULT_KD] * 3)
-            c.call_service("/pid_controller/set_gains", {"kp": [arm_sim_node.DEFAULT_KP] * 3})
+            self.assertEqual(resp["values"]["kd"], arm_sim_node.DEFAULT_KD[:3])
+            c.call_service("/pid_controller/set_gains", {"kp": arm_sim_node.DEFAULT_KP[:3]})
 
 
 if __name__ == "__main__":

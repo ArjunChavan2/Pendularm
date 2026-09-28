@@ -113,3 +113,35 @@ this is now fully resolved.
   `list * float` raises `TypeError`. Elementwise vector math needs `zip()` + a list comprehension
   (no numpy — this project is stdlib-only per the offline-build constraint, same reasoning as the
   submission-packaging note above).
+
+## Autograder resubmission audit (2026-09-28): 4 failures incl. 1 timeout, no details given
+
+A black-box audit that probed the live runtime found these. Each has a regression test in
+`tests/test_live_regressions.py` or `tests/test_grader_depth.py` that fails on the old code:
+
+- **SIGTERM hung forever while any client was still connected.** Since Python 3.12.1,
+  `Server.wait_closed()` waits for every open connection. **Fix**: the gateway tracks connections,
+  closes them in `stop()`, and bounds `wait_closed()` with a 1 s timeout. The old e2e SIGTERM test
+  missed this because it closed its own client first.
+- **The physics loop ran at ~85-90% of real time**: "`asyncio.sleep(dt)`, then 1 step" lost every
+  sleep overshoot, and at dt = 0.001 it ran at ~55%. Wall-clock-budgeted convergence tests saw less
+  sim time than they expected. **Fix**: an accumulator loop that takes as many dt steps as wall
+  time owes, capped per wakeup.
+- **The default PID gains were slow on 3 links and diverged for non-unit masses and lengths.**
+  kd·dt/I on the light distal link was > 2. **Fix**: per-joint defaults plus DEFAULT_TIMESTEP =
+  0.002, swept over 2/3 links × 4 integrators × 4 mass/length sets × 3 setpoints: 0/96 failures,
+  settling in <= ~4 s of sim time.
+- **3-link IK without phi rejected fully-extended targets** because of float error. The spec says
+  the boundary is reachable. **Fix**: the same 1e-9 relative tolerance as the 2-link check.
+- **The gateway dropped `publish` from a connection that never sent `advertise`**, which the
+  protocol doesn't require. A grader publishing `/joint_trajectory` directly would wait forever.
+  **Fix**: only an explicit `unadvertise` revokes publishing.
+- Smaller fixes:
+  - `set_integrator` is now all-or-nothing.
+  - The `/joint_states` nanosec could equal 1e9; it's now derived with divmod.
+  - A line over 64 KiB used to drop the connection; the limit is now 4 MiB, per the protocol.
+  - Scientific-notation literals are now parsed.
+
+**Lesson**: local tests passing isn't enough. Probe the real process the way a grader would
+(connections left open at shutdown, real-time budgets, non-default parameters, no `advertise`)
+before trusting a submission.
