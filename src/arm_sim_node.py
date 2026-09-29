@@ -70,6 +70,7 @@ DEFAULT_KI = [400.0, 200.0, 100.0]
 DEFAULT_KD = [100.0, 20.0, 6.0]
 INTEGRAL_LIMIT = 10.0
 MAX_CATCHUP_STEPS = 50  # per physics wakeup; beyond this, drop the backlog
+MIN_WAKE_S = 0.001
 
 
 def _defaults(per_joint: list[float], links: int) -> list[float]:
@@ -391,7 +392,9 @@ async def physics_loop(state: _ArmSimState) -> None:
     owed = 0.0
     last = time.monotonic()
     while True:
-        await asyncio.sleep(state.integrator_timestep)
+        # Never wake more often than MIN_WAKE_S: a tiny timestep is still
+        # simulated faithfully via catch-up steps, without spinning the CPU.
+        await asyncio.sleep(max(state.integrator_timestep, MIN_WAKE_S))
         now = time.monotonic()
         owed += now - last
         last = now

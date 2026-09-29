@@ -23,7 +23,10 @@ from registry import Registry
 
 async def run() -> None:
     links_str = os.environ.get("ARM_SIM_LINKS", "2")
-    if links_str not in ("2", "3"):
+    # Spec: "2" or "3", defaulting to 2. A 1-link arm is a dev-only extra for
+    # tools/visualizer.py, never enabled unless explicitly opted into.
+    allowed = ("1", "2", "3") if os.environ.get("PENDULARM_DEV_ALLOW_1LINK") == "1" else ("2", "3")
+    if links_str not in allowed:
         log(f"ARM_SIM_LINKS={links_str!r} is not '2' or '3'; defaulting to 2")
         links_str = "2"
     links = int(links_str)

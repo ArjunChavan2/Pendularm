@@ -97,6 +97,13 @@ def inverse_kinematics(x: float, y: float, lengths: list[float],
     reproduces (x, y) -- and phi, when n == 3 and phi was given.
     """
     n = len(lengths)
+    if n == 1:
+      # Dev-only 1-link arm (tools/visualizer.py): its tip can only sit on the
+      # circle of radius l; phi is ignored (it's fully determined by (x, y)).
+      r, l = (x**2 + y**2) ** 0.5, lengths[0]
+      if abs(r - l) > 1e-6 * l:
+        raise Unreachable(f"a 1-link arm only reaches the circle r = {l:g} (target r = {r:.4g})")
+      return [atan2(y, x)]
     if n == 2:
       return _two_link_ik(x, y, lengths[0], lengths[1])
     

@@ -50,8 +50,13 @@
   h2 { font-size: 13px; margin: 4px 0 0; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
   select { width: 100%; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line);
            background: var(--bg); color: var(--ink); font: inherit; }
-  .slider { display: grid; grid-template-columns: 28px 1fr 44px; gap: 8px; align-items: center; font-size: 13px; }
-  .slider output { text-align: right; font: 12px ui-monospace, Menlo, monospace; }
+  .slider { display: grid; grid-template-columns: 24px 1fr 72px; gap: 8px; align-items: center; font-size: 13px; }
+  .slider input[type=number] { padding: 4px 6px; font: 12px ui-monospace, Menlo, monospace; text-align: right; }
+  .tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; border: 1px solid var(--line);
+          border-radius: 8px; overflow: hidden; }
+  .tabs button { border: 0; border-radius: 0; background: var(--bg); padding: 7px 4px; }
+  .tabs button + button { border-left: 1px solid var(--line); }
+  .tabs button.active { background: var(--accent); color: #fff; }
   input[type=range] { width: 100%; accent-color: var(--accent); }
   #energy { width: 100%; height: 170px; display: block; }
   .legend { display: flex; gap: 14px; font-size: 12px; color: var(--muted); padding: 4px 6px 0; flex-wrap: wrap; }
@@ -76,6 +81,11 @@
   </div>
   <aside>
     <h1>Pendularm</h1>
+    <div class="tabs" role="tablist" aria-label="Number of links">
+      <button id="tab1" role="tab" data-links="1">1 link</button>
+      <button id="tab2" role="tab" data-links="2">2 links</button>
+      <button id="tab3" role="tab" data-links="3">3 links</button>
+    </div>
     <div class="conn"><span id="dot" class="dot"></span><span id="conn">connecting…</span></div>
     <div class="hint">Click the canvas to send the arm there, or type a target.</div>
     <div class="fields">
@@ -97,9 +107,9 @@
       <label for="dt">dt (s)</label><input id="dt" type="number" step="0.001" min="0.0005" value="0.01">
     </div>
     <h2>PID gains (all joints)</h2>
-    <div class="slider"><span>kp</span><input id="kp" type="range" min="0" max="1000" step="5"><output id="kpv"></output></div>
-    <div class="slider"><span>ki</span><input id="ki" type="range" min="0" max="600" step="5"><output id="kiv"></output></div>
-    <div class="slider"><span>kd</span><input id="kd" type="range" min="0" max="150" step="1"><output id="kdv"></output></div>
+    <div class="slider"><span>kp</span><input id="kp" type="range" min="0" max="1000" step="5"><input id="kpn" type="number" min="0" step="any" aria-label="kp value"></div>
+    <div class="slider"><span>ki</span><input id="ki" type="range" min="0" max="600" step="5"><input id="kin" type="number" min="0" step="any" aria-label="ki value"></div>
+    <div class="slider"><span>kd</span><input id="kd" type="range" min="0" max="150" step="1"><input id="kdn" type="number" min="0" step="any" aria-label="kd value"></div>
     <button id="defgains">Default gains</button>
     <div class="hint">Sliders set every joint to the same value (they show joint 1's).
       Low kd or a large dt can make the sim diverge; press Reset arm + Default gains to recover.</div>
@@ -138,20 +148,26 @@ async function refreshIntegrator() {
 }
 async function applyIntegrator() {
   const dt = parseFloat($("dt").value);
+  if (!(dt >= 0.0001 && dt <= 0.1)) {   // tinier steps look frozen; bigger ones just explode
+    $("msg").textContent = "dt must be between 0.0001 and 0.1 s";
+    return refreshIntegrator();
+  }
   const r = await call("/arm_sim/set_integrator", { method: $("method").value, timestep: dt });
   $("msg").textContent = r.result ? "" : r.status;
   S.energy = [];   // a new method/timestep starts a fresh energy trace
   refreshIntegrator();
 }
-function showGains() { ["kp", "ki", "kd"].forEach(k => $(k + "v").textContent = $(k).value); }
+// Slider and number box show joint 1's gain; either one sets every joint to that value.
 async function refreshGains() {
   const r = await call("/pid_controller/set_gains", {});
-  if (r.result) ["kp", "ki", "kd"].forEach(k => { if (r.values[k]) $(k).value = r.values[k][0]; });
-  showGains();
+  if (r.result) ["kp", "ki", "kd"].forEach(k => {
+    if (r.values[k]) { $(k).value = r.values[k][0]; $(k + "n").value = r.values[k][0]; }
+  });
 }
-async function applyGain(k) {
-  showGains();
-  const n = S.lengths.length || 1, v = parseFloat($(k).value);
+async function applyGain(k, v) {
+  if (!Number.isFinite(v) || v < 0) { $("msg").textContent = `${k} must be a number ≥ 0`; refreshGains(); return; }
+  $(k).value = v; $(k + "n").value = v;
+  const n = S.lengths.length || 1;
   const r = await call("/pid_controller/set_gains", { [k]: Array(n).fill(v) });
   $("msg").textContent = r.result ? "" : r.status;
 }
@@ -289,7 +305,11 @@ const toPx = (v, x, y) => [v.mid + x * v.scale, v.mid - y * v.scale];
 canvas.addEventListener("pointerdown", e => {
   if (!S.connected) return;
   const r = canvas.getBoundingClientRect(), v = view();
-  sendGoal((e.clientX - r.left - v.mid) / v.scale, (v.mid - (e.clientY - r.top)) / v.scale);
+  let x = (e.clientX - r.left - v.mid) / v.scale, y = (v.mid - (e.clientY - r.top)) / v.scale;
+  if (S.lengths.length === 1) {   // a 1-link tip only reaches its circle: aim in the clicked direction
+    const a = Math.atan2(y, x); x = S.lengths[0] * Math.cos(a); y = S.lengths[0] * Math.sin(a);
+  }
+  sendGoal(x, y);
 });
 
 // ---- drawing ----
@@ -353,7 +373,8 @@ function renderPanel() {
   $("dot").className = "dot" + (S.connected ? " on" : "");
   $("conn").textContent = S.connected ? "connected to simulator" : "simulator not running — start it with make run";
   $("pid").textContent = S.pid ? "Disable PID" : "Enable PID";
-  ["go", "pid", "reset", "method", "dt", "kp", "ki", "kd", "defgains"].forEach(id => $(id).disabled = !S.connected);
+  [1, 2, 3].forEach(n => $("tab" + n).classList.toggle("active", S.lengths.length === n));
+  ["go", "pid", "reset", "method", "dt", "kp", "ki", "kd", "kpn", "kin", "kdn", "defgains"].forEach(id => $(id).disabled = !S.connected);
   const f = a => "[" + a.map(v => (v >= 0 ? "+" : "") + v.toFixed(3)).join(", ") + "]";
   $("info").textContent =
     `links   ${S.lengths.length}  L=${f(S.lengths)}\n` +
@@ -381,7 +402,21 @@ $("defgains").onclick = async () => {    // the simulator's tuned per-joint defa
 };
 $("method").onchange = applyIntegrator;
 $("dt").onchange = applyIntegrator;
-["kp", "ki", "kd"].forEach(k => { $(k).oninput = showGains; $(k).onchange = () => applyGain(k); });
+["kp", "ki", "kd"].forEach(k => {
+  $(k).oninput = () => { $(k + "n").value = $(k).value; };
+  $(k).onchange = () => applyGain(k, parseFloat($(k).value));
+  $(k + "n").onchange = () => applyGain(k, parseFloat($(k + "n").value));
+  $(k + "n").onkeydown = e => { if (e.key === "Enter") $(k + "n").blur(); };
+});
+[1, 2, 3].forEach(n => $("tab" + n).onclick = async () => {
+  if (S.lengths.length === n) return;
+  $("msg").textContent = `restarting simulator with ${n} link${n > 1 ? "s" : ""}…`;
+  S.lengths = []; S.q = []; S.target = null; S.status = "idle"; S.trail = []; S.energy = [];
+  let r;
+  try { r = await (await fetch("/links", { method: "POST", body: JSON.stringify({ links: n }) })).json(); }
+  catch (e) { r = { result: false, status: String(e) }; }
+  $("msg").textContent = r.result ? "" : "could not switch links: " + r.status;
+});
 setInterval(() => { if (S.connected) refreshParams(); }, 2000);   // link lengths can change at runtime
 
 connectEvents();
