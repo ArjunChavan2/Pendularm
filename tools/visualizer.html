@@ -106,13 +106,15 @@
       <select id="method"><option>euler</option><option>midpoint</option><option>verlet</option><option>rk4</option></select>
       <label for="dt">dt (s)</label><input id="dt" type="number" step="0.001" min="0.0005" value="0.01">
     </div>
-    <h2>PID gains (all joints)</h2>
+    <h2>PID gains (joint 1; outer joints scaled)</h2>
     <div class="slider"><span>kp</span><input id="kp" type="range" min="0" max="1000" step="5"><input id="kpn" type="number" min="0" step="any" aria-label="kp value"></div>
     <div class="slider"><span>ki</span><input id="ki" type="range" min="0" max="600" step="5"><input id="kin" type="number" min="0" step="any" aria-label="ki value"></div>
     <div class="slider"><span>kd</span><input id="kd" type="range" min="0" max="150" step="1"><input id="kdn" type="number" min="0" step="any" aria-label="kd value"></div>
     <button id="defgains">Default gains</button>
-    <div class="hint">Sliders set every joint to the same value (they show joint 1's).
-      Low kd or a large dt can make the sim diverge; press Reset arm + Default gains to recover.</div>
+    <div class="hint">Each value is joint 1's gain; joints 2–3 get the same proportion of their
+      tuned defaults (they carry less inertia). Very low kd or a large dt can still make it
+      unstable — press Default gains, then Reset arm.</div>
+    <pre id="gainsinfo" class="hint"></pre>
     <div id="msg" class="msg"></div>
     <pre id="info"></pre>
   </aside>
@@ -157,19 +159,25 @@ async function applyIntegrator() {
   S.energy = [];   // a new method/timestep starts a fresh energy trace
   refreshIntegrator();
 }
-// Slider and number box show joint 1's gain; either one sets every joint to that value.
+// Slider and number box set joint 1's gain; outer joints are scaled by the tuned
+// defaults' ratios (they carry much less inertia -- the same kd on every joint
+// makes the distal joint overcorrect and the arm thrash).
+const DEFAULTS = { kp: [600, 400, 200], ki: [400, 200, 100], kd: [100, 20, 6] };
+const perJoint = (k, v, n) => DEFAULTS[k].slice(0, n).map(d => +(v * d / DEFAULTS[k][0]).toFixed(4));
 async function refreshGains() {
   const r = await call("/pid_controller/set_gains", {});
   if (r.result) ["kp", "ki", "kd"].forEach(k => {
     if (r.values[k]) { $(k).value = r.values[k][0]; $(k + "n").value = r.values[k][0]; }
   });
+  if (r.result) $("gainsinfo").textContent = ["kp", "ki", "kd"].map(k => `${k} = [${r.values[k].map(v => +v.toFixed(2)).join(", ")}]`).join("\n");
 }
 async function applyGain(k, v) {
   if (!Number.isFinite(v) || v < 0) { $("msg").textContent = `${k} must be a number ≥ 0`; refreshGains(); return; }
   $(k).value = v; $(k + "n").value = v;
   const n = S.lengths.length || 1;
-  const r = await call("/pid_controller/set_gains", { [k]: Array(n).fill(v) });
+  const r = await call("/pid_controller/set_gains", { [k]: perJoint(k, v, n) });
   $("msg").textContent = r.result ? "" : r.status;
+  refreshGains();
 }
 
 // ---- energy: T = sum 1/2 m|v_com|^2 + 1/2 (m l^2/12) w^2,  V = sum m g y_com  (uniform rods) ----
@@ -396,7 +404,7 @@ $("reset").onclick = async () => { await call("/arm_sim/reset", {}); S.target = 
 $("clear").onclick = () => { S.trail = []; S.energy = []; };
 $("defgains").onclick = async () => {    // the simulator's tuned per-joint defaults (arm_sim_node.DEFAULT_K*)
   const n = S.lengths.length || 3;
-  const r = await call("/pid_controller/set_gains", { kp: [600, 400, 200].slice(0, n), ki: [400, 200, 100].slice(0, n), kd: [100, 20, 6].slice(0, n) });
+  const r = await call("/pid_controller/set_gains", { kp: DEFAULTS.kp.slice(0, n), ki: DEFAULTS.ki.slice(0, n), kd: DEFAULTS.kd.slice(0, n) });
   $("msg").textContent = r.result ? "" : r.status;
   refreshGains();
 };
