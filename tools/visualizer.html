@@ -97,9 +97,12 @@
       <label for="dt">dt (s)</label><input id="dt" type="number" step="0.001" min="0.0005" value="0.01">
     </div>
     <h2>PID gains (all joints)</h2>
-    <div class="slider"><span>kp</span><input id="kp" type="range" min="0" max="400" step="5"><output id="kpv"></output></div>
-    <div class="slider"><span>ki</span><input id="ki" type="range" min="0" max="150" step="1"><output id="kiv"></output></div>
-    <div class="slider"><span>kd</span><input id="kd" type="range" min="0" max="60" step="0.5"><output id="kdv"></output></div>
+    <div class="slider"><span>kp</span><input id="kp" type="range" min="0" max="1000" step="5"><output id="kpv"></output></div>
+    <div class="slider"><span>ki</span><input id="ki" type="range" min="0" max="600" step="5"><output id="kiv"></output></div>
+    <div class="slider"><span>kd</span><input id="kd" type="range" min="0" max="150" step="1"><output id="kdv"></output></div>
+    <button id="defgains">Default gains</button>
+    <div class="hint">Sliders set every joint to the same value (they show joint 1's).
+      Low kd or a large dt can make the sim diverge; press Reset arm + Default gains to recover.</div>
     <div id="msg" class="msg"></div>
     <pre id="info"></pre>
   </aside>
@@ -238,7 +241,14 @@ function connectEvents() {
     }
     const b = m.msg || {};
     if (m.topic === "/joint_states") {
-      S.q = b.position || []; S.effort = b.effort || [];
+      const pos = b.position || [];
+      S.diverged = pos.some(v => v === null);
+      if (S.diverged) {
+        $("msg").textContent = "Simulation diverged (NaN): gains/timestep made it unstable. Press Reset arm, then restore kd / lower dt.";
+        return;
+      }
+      if ($("msg").textContent.startsWith("Simulation diverged")) $("msg").textContent = "";
+      S.q = pos; S.effort = b.effort || [];
       const st = (b.header || {}).stamp || {};
       const t = (st.sec || 0) + (st.nanosec || 0) * 1e-9;
       if (t < S.t) S.energy = [];            // sim time went backwards: /arm_sim/reset
@@ -256,7 +266,7 @@ function connectEvents() {
         if (S.trail.length > 400) S.trail.shift();
       }
     } else if (m.topic === "/ik_action/feedback") {
-      S.dist = b.distance_remaining;
+      if (b.distance_remaining != null) S.dist = b.distance_remaining;
     } else if (m.topic === "/ik_action/result") {
       S.status = b.outcome; S.dist = b.final_distance;
     }
@@ -343,7 +353,7 @@ function renderPanel() {
   $("dot").className = "dot" + (S.connected ? " on" : "");
   $("conn").textContent = S.connected ? "connected to simulator" : "simulator not running — start it with make run";
   $("pid").textContent = S.pid ? "Disable PID" : "Enable PID";
-  ["go", "pid", "reset", "method", "dt", "kp", "ki", "kd"].forEach(id => $(id).disabled = !S.connected);
+  ["go", "pid", "reset", "method", "dt", "kp", "ki", "kd", "defgains"].forEach(id => $(id).disabled = !S.connected);
   const f = a => "[" + a.map(v => (v >= 0 ? "+" : "") + v.toFixed(3)).join(", ") + "]";
   $("info").textContent =
     `links   ${S.lengths.length}  L=${f(S.lengths)}\n` +
@@ -363,6 +373,12 @@ $("go").onclick = () => {
 $("pid").onclick = () => setPid(!S.pid);
 $("reset").onclick = async () => { await call("/arm_sim/reset", {}); S.target = null; S.status = "idle"; S.dist = null; S.trail = []; S.energy = []; };
 $("clear").onclick = () => { S.trail = []; S.energy = []; };
+$("defgains").onclick = async () => {    // the simulator's tuned per-joint defaults (arm_sim_node.DEFAULT_K*)
+  const n = S.lengths.length || 3;
+  const r = await call("/pid_controller/set_gains", { kp: [600, 400, 200].slice(0, n), ki: [400, 200, 100].slice(0, n), kd: [100, 20, 6].slice(0, n) });
+  $("msg").textContent = r.result ? "" : r.status;
+  refreshGains();
+};
 $("method").onchange = applyIntegrator;
 $("dt").onchange = applyIntegrator;
 ["kp", "ki", "kd"].forEach(k => { $(k).oninput = showGains; $(k).onchange = () => applyGain(k); });

@@ -126,6 +126,17 @@ class SimBridge:
             return {"result": False, "status": f"bridge: {e or 'timeout'}", "values": {}}
 
 
+def _finite(value):
+    """Recursively replace NaN/inf floats with None so the payload is strict JSON."""
+    if isinstance(value, float):
+        return value if value == value and value not in (float("inf"), float("-inf")) else None
+    if isinstance(value, dict):
+        return {k: _finite(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_finite(v) for v in value]
+    return value
+
+
 BRIDGE = SimBridge()
 ALLOWED_SERVICES = {"/ik_action/send_goal", "/ik_action/cancel_goal", "/pid_controller/enable",
                     "/pid_controller/set_gains", "/arm_sim/reset", "/arm_sim/set_params",
@@ -169,7 +180,10 @@ class Handler(BaseHTTPRequestHandler):
             BRIDGE.unsubscribe(q)
 
     def _write_event(self, msg: dict) -> None:
-        self.wfile.write(b"data: " + json.dumps(msg).encode() + b"\n\n")
+        # The simulator can legitimately diverge (spec: a too-large dt or bad
+        # gains "will visibly diverge"), and Python's json emits bare NaN /
+        # Infinity tokens that browsers' JSON.parse rejects -- send null instead.
+        self.wfile.write(b"data: " + json.dumps(_finite(msg), allow_nan=False).encode() + b"\n\n")
         self.wfile.flush()
 
     def do_POST(self) -> None:
@@ -185,7 +199,7 @@ class Handler(BaseHTTPRequestHandler):
         if service not in ALLOWED_SERVICES:
             self.send_error(403)
             return
-        body = json.dumps(BRIDGE.call(service, args)).encode()
+        body = json.dumps(_finite(BRIDGE.call(service, args)), allow_nan=False).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
