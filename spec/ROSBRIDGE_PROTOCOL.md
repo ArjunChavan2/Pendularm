@@ -58,6 +58,11 @@ Required: `op`, `topic`, `msg`. Optional: `id`.
 `msg` may be any JSON value. The gateway forwards the payload only to current
 matching subscribers. There is no history, latching, or replay.
 
+A connection may publish on a topic only while it currently holds an
+advertisement for that topic. A `publish` without a current advertisement is
+silently dropped. `unadvertise` revokes this until the connection advertises
+again.
+
 ### `subscribe`
 
 Required: `op`, `topic`, `type`. Optional: `id`.

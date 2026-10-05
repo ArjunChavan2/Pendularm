@@ -4,7 +4,7 @@ Each test launches its own real runtime (`python3 src/main.py`, 3 links) and
 talks to it over the real TCP/JSON gateway, exactly like the autograder:
   - SIGTERM must exit promptly even while a client is still connected
     (Python >= 3.12.1's Server.wait_closed() waits on open connections).
-  - /joint_trajectory publishes are honored without a prior `advertise`.
+  - /joint_trajectory publishes are honored only after `advertise` (Project 1 rule).
   - The physics loop keeps sim time locked to wall time.
   - /joint_states' stamp nanosec stays in [0, 1e9).
   - A line over asyncio's default 64 KiB limit (but under the protocol's
@@ -92,9 +92,10 @@ class TestLiveRegressions(unittest.TestCase):
         self.assertGreater(count, 100)
         self.assertGreater(ratio, 0.95, f"sim/wall ratio {ratio:.3f}")
 
-    def test_trajectory_without_advertise_converges_with_default_gains(self):
+    def test_trajectory_after_advertise_converges_with_default_gains(self):
         setpoint = [0.6, -0.4, 0.3]
         self.assertTrue(self.c.call_service("/pid_controller/enable", {"data": True})["result"])
+        self.c.send({"op": "advertise", "topic": "/joint_trajectory", "type": "trajectory_msgs/JointTrajectory"})
         self.c.send({"op": "publish", "topic": "/joint_trajectory", "msg": {
             "joint_names": ["joint1", "joint2", "joint3"],
             "points": [{"positions": setpoint, "velocities": [0, 0, 0]}]}})

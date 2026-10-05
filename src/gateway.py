@@ -39,10 +39,6 @@ class Connection:
     def __init__(self, writer: asyncio.StreamWriter) -> None:
         self._writer = writer
         self.advertised_services: set[str] = set()
-        # Topics this connection explicitly unadvertised: publishing there is
-        # dropped until it advertises again. A connection that never
-        # advertised may still publish (the protocol doesn't require it).
-        self.revoked_topics: set[str] = set()
 
     def close(self) -> None:
         try:
@@ -143,10 +139,8 @@ class Gateway:
         try:
             if op == "advertise":
                 self.registry.advertise(conn, message["topic"])
-                conn.revoked_topics.discard(message["topic"])
             elif op == "unadvertise":
                 self.registry.unadvertise(conn, message["topic"])
-                conn.revoked_topics.add(message["topic"])
             elif op == "subscribe":
                 self.registry.subscribe(conn, message["topic"])
                 conn.send({"op": "status", "level": "info", "msg": f"subscribed to {message['topic']}", "id": req_id})
@@ -154,12 +148,10 @@ class Gateway:
                 self.registry.unsubscribe(conn, message["topic"])
             elif op == "publish":
                 topic = message["topic"]
-                # The protocol doesn't require advertise before publish, so a
-                # connection that never advertised may publish. An explicit
-                # unadvertise revokes publishing on that topic (silently
-                # dropped -- publish has no acknowledgement) until it
-                # advertises again.
-                if topic not in conn.revoked_topics:
+                # A connection may publish on a topic only while it currently
+                # holds an advertisement there; unadvertise immediately
+                # revokes it. Silently dropped, matching Project 1.
+                if self.registry.is_advertised(conn, topic):
                     self.registry.publish(topic, message.get("msg"))
             elif op == "advertise_service":
                 service = message["service"]

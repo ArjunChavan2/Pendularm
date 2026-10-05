@@ -133,9 +133,11 @@ A black-box audit that probed the live runtime found these. Each has a regressio
   settling in <= ~4 s of sim time.
 - **3-link IK without phi rejected fully-extended targets** because of float error. The spec says
   the boundary is reachable. **Fix**: the same 1e-9 relative tolerance as the 2-link check.
-- **The gateway dropped `publish` from a connection that never sent `advertise`**, which the
-  protocol doesn't require. A grader publishing `/joint_trajectory` directly would wait forever.
-  **Fix**: only an explicit `unadvertise` revokes publishing.
+- **Publish gating follows Project 1.** An earlier version let a connection publish without an
+  advertisement, which the spec never allowed. The gateway now drops `publish` unless the connection
+  currently holds an advertisement for that topic, as in Project 1. The autograder advertises
+  `/joint_trajectory` before publishing, so this does not stall grading. The protocol spec was
+  updated to state the rule.
 - Smaller fixes:
   - `set_integrator` is now all-or-nothing.
   - The `/joint_states` nanosec could equal 1e9; it's now derived with divmod.
