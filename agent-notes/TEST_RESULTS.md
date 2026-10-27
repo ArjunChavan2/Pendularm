@@ -345,3 +345,14 @@ diagnosed:
   since it's byte-for-byte identical to Project 1's already-tested `gateway.py` (confirmed by
   `agent-notes/AUDIT.md`'s own `diff` check, and re-confirmed present verbatim here) and testing it
   again would be re-litigating Project 1's own test coverage rather than this project's own code.
+
+## Autograder: tests run while `make run` is up (2026-10-27)
+
+- First submission failed 6 of 11 test files: the grader's `make run` held 9095, so in-process
+  test gateways couldn't bind, and the live tests' own `make run`/`main.py` couldn't either, so
+  they talked to the grader's 2-link runtime (`2 != 3`, NaN positions, wrong default gains).
+- Fix (branch `fix-test-port`): tests use a free port (`client_helper.PORT`; `gateway.PORT = PORT`
+  in-process; `GATEWAY_PORT` env for spawned runtimes, default 9095). `make test` now runs
+  `tests/run_tests.py` (grader requirement), documented in `tests/README.md`.
+- Verified with another process holding 9095: full suite (204) and all 11 files standalone pass.
+  Details: `spec/submission_layout.md`, "The grader runs your tests while `make run` is up".

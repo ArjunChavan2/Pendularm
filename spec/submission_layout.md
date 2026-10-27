@@ -71,3 +71,32 @@ already does this correctly); otherwise apply this pattern by hand.
 tar tzf submission.tar.gz | sort          # eyeball the entry list -- no bare "." entry
 tar tzf submission.tar.gz | grep -qx 'Makefile' && echo "Makefile at archive root: OK"
 ```
+
+## The grader runs your tests while `make run` is up
+
+Learned the hard way on Project 1 and Project 2 (2026-10-27): the autograder starts `make run`
+(which holds `127.0.0.1:9095`), *then* runs every `tests/test_*.py` file on its own, plus
+`make test`. Two rules follow.
+
+**Rule A — tests never bind 9095.** Any test that starts its own server must use a free port:
+
+- In-process gateways: `tests/client_helper.py` picks `PORT` from a free OS port (bind to port 0),
+  and each test file that starts a gateway sets `gateway.PORT = PORT` right after its imports.
+- Subprocess runtimes (`make run` / `src/main.py` launched by a test): `src/gateway.py` reads
+  `PORT = int(os.environ.get("GATEWAY_PORT", "9095"))`, and the test passes
+  `GATEWAY_PORT=<free port>` in the child's env. With the variable unset the runtime still serves
+  9095, as the spec requires.
+
+What breaking it looks like: `OSError: [Errno 98] ... ('127.0.0.1', 9095): address already in use`
+in a server thread, then assertions failing because the test's clients silently talked to the
+grader's runtime instead of the test's own (e.g. a 2-link arm answering a 3-link test, an
+in-process store that never received anything). Some files can even *pass* by accident this way.
+
+**Rule B — `make test` runs `tests/run_tests.py`.** The grader prints
+"`make test` does not run tests/run_tests.py. Use the `test` target in tests/README.md, rule 1."
+and marks the result FAIL even when every test passes. Fix: add `tests/run_tests.py` (unittest
+discovery over `tests/`, exit 1 on failure), set the Makefile's `test:` to
+`python3 tests/run_tests.py`, and add `tests/README.md` whose rule 1 says so.
+
+**Verify before uploading:** with something already listening on 9095 (e.g. a backgrounded
+`make run`), run `make test` and each `python3 tests/test_*.py` on its own — all must pass.
