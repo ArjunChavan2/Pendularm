@@ -4,6 +4,6 @@ build:
 run:
 	python3 src/main.py
 test:
-	python3 -m unittest discover -s tests -v
+	python3 tests/run_tests.py
 clean:
 	rm -rf src/__pycache__ tests/__pycache__
