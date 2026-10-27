@@ -31,7 +31,7 @@ from test_live_process_e2e import HOST, PORT, REPO_ROOT, _RawClient, _wait_for_p
 
 
 def _start(links: int = 3) -> subprocess.Popen:
-    env = dict(os.environ, ARM_SIM_LINKS=str(links))
+    env = dict(os.environ, ARM_SIM_LINKS=str(links), GATEWAY_PORT=str(PORT))
     proc = subprocess.Popen([sys.executable, "src/main.py"], cwd=REPO_ROOT, env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if not _wait_for_port(HOST, PORT, timeout=10.0):

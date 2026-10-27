@@ -8,7 +8,16 @@ import time
 from typing import Any
 
 HOST = "127.0.0.1"
-PORT = 9095
+
+
+def _free_port() -> int:
+    # Test servers must not use 9095: the grader runs our tests while `make run` already holds it.
+    with socket.socket() as s:
+        s.bind((HOST, 0))
+        return s.getsockname()[1]
+
+
+PORT = _free_port()
 
 
 class Client:

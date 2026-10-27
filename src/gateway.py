@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 from dataclasses import dataclass, field
 from typing import Any
@@ -22,7 +23,7 @@ from typing import Any
 from registry import Registry
 
 HOST = "127.0.0.1"
-PORT = 9095
+PORT = int(os.environ.get("GATEWAY_PORT", "9095"))  # override is for tests only; the spec port is 9095
 
 SERVICE_CALL_TIMEOUT_S = 5.0
 MAX_LINE_BYTES = 4 * 1024 * 1024  # protocol: "Implementations may reject a line larger than 4 MiB"

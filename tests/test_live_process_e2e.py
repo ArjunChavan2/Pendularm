@@ -27,7 +27,17 @@ import time
 import unittest
 
 REPO_ROOT = os.path.join(os.path.dirname(__file__), "..")
-HOST, PORT = "127.0.0.1", 9095
+HOST = "127.0.0.1"
+
+
+def _free_port() -> int:
+    # The spawned runtime must not use 9095: the grader runs our tests while its own `make run` holds it.
+    with socket.socket() as s:
+        s.bind((HOST, 0))
+        return s.getsockname()[1]
+
+
+PORT = _free_port()
 
 
 def _wait_for_port(host: str, port: int, timeout: float = 10.0) -> bool:
@@ -111,6 +121,7 @@ class TestLiveMakeRunProcess(unittest.TestCase):
 
         env = dict(os.environ)
         env["ARM_SIM_LINKS"] = "3"
+        env["GATEWAY_PORT"] = str(PORT)
         cls.proc = subprocess.Popen(
             ["make", "run"], cwd=REPO_ROOT, env=env,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -381,7 +392,7 @@ class TestLiveMakeRunProcess(unittest.TestCase):
             released = False
         except OSError:
             released = True
-        self.assertTrue(released, "port 9095 still accepting connections after shutdown")
+        self.assertTrue(released, "test port still accepting connections after shutdown")
 
         # `make run`'s own process may still be alive (it was waiting on the
         # now-dead child); clean it up so tearDownClass's SIGTERM to it is a

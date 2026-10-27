@@ -24,10 +24,13 @@ sys.path.insert(0, os.path.dirname(__file__))
 import arm_dynamics  # noqa: E402
 import arm_sim_node  # noqa: E402
 from arm_sim_node import _ArmSimState, physics_loop, publish_loop  # noqa: E402
+import gateway  # noqa: E402
 from gateway import Gateway  # noqa: E402
 from registry import Registry  # noqa: E402
 
-from client_helper import Client  # noqa: E402
+from client_helper import PORT, Client  # noqa: E402
+
+gateway.PORT = PORT  # serve on the tests' free port, not the live 9095
 
 
 def _counting_sleep(n_ticks: int, on_tick=None):
